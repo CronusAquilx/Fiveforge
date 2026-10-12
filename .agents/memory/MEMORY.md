@@ -1,0 +1,1 @@
+- [GitHub research vs. app connection](github-research.md) — For Forge Studio, GitHub means public repository/workflow research, not an in-app integration.

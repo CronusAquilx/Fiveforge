@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Forge Studio"
+description = "A local-first 3D asset workshop for FiveM creators and GTA V modders. Import supported 3D models and textures, inspect and edit them in a real browser-based viewport, save projects locally, and export standard 3D formats without claiming native GTA asset conversion."
+version = "1.0.0"
+id = "artifacts/forge-studio"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 21072
+
+[services.development]
+run = "pnpm --filter @workspace/forge-studio run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/forge-studio", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/forge-studio/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "21072"
+BASE_PATH = "/"
