@@ -1,1 +1,2 @@
 - [GitHub research vs. app connection](github-research.md) — For Forge Studio, GitHub means public repository/workflow research, not an in-app integration.
+- [FiveM native formats](fivem-native-formats.md) — Distinguish preserving YFT/YTD assets in ZIPs from actually decoding, editing, and rebuilding GTA binaries.

@@ -8,13 +8,15 @@ import {
   X, ZoomIn,
 } from 'lucide-react';
 import { Viewport } from '@/components/Viewport';
+import ResourcePackageDialog from '@/components/ResourcePackageDialog';
 import { downloadBlob, expandArchives, exportModel, loadAsset, MAX_FILE_SIZE, validateFiles } from '@/lib/model-io';
 import { getProject, listProjects, saveProject, type LocalProject } from '@/lib/projects';
+import { buildFiveMResourceZip, readResourcePackage, type ResourcePackage } from '@/lib/resource-package';
 
 type Notice = { kind: 'success' | 'error' | 'info'; message: string } | null;
 type Busy = { label: string; progress: number } | null;
-const supported = '.glb,.gltf,.obj,.stl,.mtl,.png,.jpg,.jpeg,.webp,.yft,.ytd,.ydr,.ydd,.ybn,.zip';
-const unsupportedGame = ['YFT', 'YTD', 'YDR', 'YDD', 'YBN'];
+const supported = '.glb,.gltf,.obj,.stl,.mtl,.png,.jpg,.jpeg,.webp,.yft,.ytd,.ydr,.ydd,.ybn,.ytyp,.ymap,.ymf,.ycd,.ymt,.yld,.ypt,.meta,.lua,.zip';
+const unsupportedGame = ['YFT', 'YTD', 'YDR', 'YDD', 'YBN', 'YTYP', 'YMAP'];
 
 function meshStats(root: THREE.Object3D | null) {
   let meshes = 0, triangles = 0, materials = 0;
@@ -65,6 +67,8 @@ function IconButton({ icon: Icon, label, onClick, active = false, disabled = fal
 function App() {
   const picker = useRef<HTMLInputElement>(null);
   const texturePicker = useRef<HTMLInputElement>(null);
+  const resourcePicker = useRef<HTMLInputElement>(null);
+  const resourceFolderPicker = useRef<HTMLInputElement>(null);
   const [root, setRoot] = useState<THREE.Group | null>(null);
   const [sceneRevision, setSceneRevision] = useState(0);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -89,6 +93,8 @@ function App() {
   const [panelTab, setPanelTab] = useState<'object' | 'material'>('object');
   const [exportOpen, setExportOpen] = useState(false);
   const [projectOpen, setProjectOpen] = useState(false);
+  const [resourceOpen, setResourceOpen] = useState(false);
+  const [resourcePackage, setResourcePackage] = useState<ResourcePackage | null>(null);
   const [projects, setProjects] = useState<LocalProject[]>([]);
   const [exportName, setExportName] = useState('vehicle_asset');
   const [textureShown, setTextureShown] = useState(true);
@@ -102,6 +108,10 @@ function App() {
     };
     mobile.addEventListener('change', syncPanels);
     return () => mobile.removeEventListener('change', syncPanels);
+  }, []);
+  useEffect(() => {
+    resourceFolderPicker.current?.setAttribute('webkitdirectory', '');
+    resourceFolderPicker.current?.setAttribute('directory', '');
   }, []);
   const history = useRef<THREE.Group[]>([]);
   const future = useRef<THREE.Group[]>([]);
@@ -126,10 +136,10 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [notice]);
   useEffect(() => {
-    const beforeUnload = (event: BeforeUnloadEvent) => { if (dirty) { event.preventDefault(); event.returnValue = ''; } };
+    const beforeUnload = (event: BeforeUnloadEvent) => { if (dirty || resourcePackage) { event.preventDefault(); event.returnValue = ''; } };
     window.addEventListener('beforeunload', beforeUnload);
     return () => window.removeEventListener('beforeunload', beforeUnload);
-  }, [dirty]);
+  }, [dirty, resourcePackage]);
   useEffect(() => {
     if (!exportOpen && !projectOpen) return;
     const dismiss = (event: KeyboardEvent) => { if (event.key === 'Escape') { setExportOpen(false); setProjectOpen(false); } };
@@ -205,6 +215,18 @@ function App() {
     } catch (error) {
       window.clearInterval(progressTimer);
       setBusy(null);
+      if (files.some((file) => file.name.toLowerCase().endsWith('.zip'))) {
+        try {
+          const resource = await readResourcePackage(files);
+          setResourcePackage(resource);
+          setResourceOpen(true);
+          const nativeCount = resource.files.filter((file) => file.kind === 'native').length;
+          setNotice({ kind: 'success', message: `${resource.name} imported · ${resource.files.length} resource files${nativeCount ? ` · ${nativeCount} native GTA assets preserved` : ''}` });
+          return true;
+        } catch {
+          // Keep the model import error when this ZIP is not a FiveM resource.
+        }
+      }
       setNotice({ kind: 'error', message: error instanceof Error ? error.message : 'Could not read this file.' });
       return false;
     }
@@ -212,7 +234,16 @@ function App() {
   const loadPicked = (files: FileList | null, mode: 'append' | 'replace') => {
     if (!files?.length) return;
     const list = Array.from(files);
-    if (list.some((file) => file.size > MAX_FILE_SIZE)) { setNotice({ kind: 'error', message: 'Files must be smaller than 250 MB.' }); return; }
+    if (list.some((file) => !file.name.toLowerCase().endsWith('.zip') && file.size > MAX_FILE_SIZE)) { setNotice({ kind: 'error', message: 'Files must be smaller than 250 MB.' }); return; }
+    const nativeExtensions = ['yft', 'ytd', 'ydr', 'ydd', 'ybn', 'ytyp', 'ymap', 'ymf', 'ycd', 'ymt', 'yld', 'ypt', 'meta'];
+    const pickedExtensions = list.map((file) => file.name.split('.').pop()?.toLowerCase() || '');
+    const hasResourceManifest = list.some((file) => ['fxmanifest.lua', '__resource.lua'].includes(file.name.split('/').pop()?.toLowerCase() || ''));
+    if (!list.some((file) => file.name.toLowerCase().endsWith('.zip')) &&
+        (pickedExtensions.some((ext) => nativeExtensions.includes(ext)) || hasResourceManifest) &&
+        !pickedExtensions.some((ext) => ['glb', 'gltf', 'obj', 'stl'].includes(ext))) {
+      void importResource(files);
+      return;
+    }
     void walkFiles(list, mode);
   };
   const undo = () => { const prev = history.current.pop(); if (!prev || !root) return; future.current.push(cloneScene(root)); setRoot(prev); setSelectedId(prev.userData.forgeHistoryId || prev.uuid); setDirty(true); };
@@ -325,7 +356,49 @@ function App() {
     context.drawImage(image, 0, 0);
     canvas.toBlob((blob) => { if (blob) downloadBlob(blob, `${activeMesh?.name || 'texture'}-basecolor.png`); });
   };
+  const importResource = async (picked: FileList | null) => {
+    if (!picked?.length) return;
+    const files = Array.from(picked);
+    if (files.some((file) => !file.name.toLowerCase().endsWith('.zip') && file.size > MAX_FILE_SIZE)) {
+      setNotice({ kind: 'error', message: 'Resource files must be smaller than 250 MB each.' });
+      return;
+    }
+    setBusy({ label: 'Reading FiveM resource', progress: 4 });
+    try {
+      const resource = await readResourcePackage(files, (completed, total, label) => {
+        setBusy({ label: `Unpacking ${label} (${completed}/${total})`, progress: Math.min(88, 8 + Math.round((completed / total) * 78)) });
+      });
+      setResourcePackage(resource);
+      setResourceOpen(true);
+      const nativeCount = resource.files.filter((file) => file.kind === 'native').length;
+      setNotice({
+        kind: 'success',
+        message: `${resource.name} imported · ${resource.files.length} files${nativeCount ? ` · ${nativeCount} native GTA assets preserved` : ''}`,
+      });
+    } catch (error) {
+      setNotice({ kind: 'error', message: error instanceof Error ? error.message : 'Could not read this FiveM resource.' });
+    } finally {
+      setBusy(null);
+    }
+  };
+  const exportResource = async () => {
+    if (!resourcePackage) return;
+    const safeName = resourcePackage.name.trim().replace(/[^\w.-]+/g, '_') || 'fivem_resource';
+    setBusy({ label: 'Building FiveM resource ZIP', progress: 20 });
+    try {
+      const blob = await buildFiveMResourceZip(resourcePackage);
+      downloadBlob(blob, `${safeName}.zip`);
+      setResourceOpen(false);
+      setExportOpen(false);
+      setNotice({ kind: 'success', message: `${safeName}.zip downloaded as a FiveM resource package.` });
+    } catch (error) {
+      setNotice({ kind: 'error', message: `Resource export failed: ${error instanceof Error ? error.message : 'unknown error'}` });
+    } finally {
+      setBusy(null);
+    }
+  };
   const fitView = () => window.dispatchEvent(new CustomEvent('forge-fit-view'));
+  const closeResourceDialog = useCallback(() => setResourceOpen(false), []);
   const toggleVisible = (item: THREE.Object3D) => { snapshot(); item.visible = !item.visible; setSceneRevision((v) => v + 1); setDirty(true); };
   const toggleLock = (item: THREE.Object3D) => { snapshot(); item.userData.forgeLocked = !item.userData.forgeLocked; setSceneRevision((v) => v + 1); setDirty(true); };
   const setSelection = (item: THREE.Object3D) => {
@@ -338,6 +411,7 @@ function App() {
   const clearScene = () => {
     if (dirty && !window.confirm('Discard unsaved changes and create a new project?')) return;
     setRoot(null); setSourceFiles([]); setSelectedId(null); setFormat('—'); setProjectName('Untitled project'); setHasSavedProject(false);
+    setResourcePackage(null); setResourceOpen(false);
     setProjectId(crypto.randomUUID()); setDirty(false); history.current = []; future.current = []; hiddenTextures.current.clear(); textureRef.current = null; setTextureShown(true);
   };
   const openImport = (mode: 'append' | 'replace') => {
@@ -349,6 +423,8 @@ function App() {
     <main className="studio-shell" onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={(event) => { if (event.currentTarget === event.target) setDragging(false); }} onDrop={(event) => { event.preventDefault(); setDragging(false); loadPicked(event.dataTransfer.files, 'append'); }}>
       <input ref={picker} className="visually-hidden" type="file" multiple accept={supported} onChange={(event) => { loadPicked(event.target.files, nextImportMode); event.target.value = ''; }} />
       <input ref={texturePicker} className="visually-hidden" type="file" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" onChange={(event) => setTexture(event.target.files?.[0])} />
+      <input ref={resourcePicker} className="visually-hidden" type="file" multiple accept=".zip,.yft,.ytd,.ydr,.ydd,.ybn,.ytyp,.ymap,.ymf,.ycd,.ymt,.yld,.ypt,.meta,.lua,.json,.cfg,.txt" onChange={(event) => { void importResource(event.target.files); event.target.value = ''; }} />
+      <input ref={resourceFolderPicker} className="visually-hidden" type="file" multiple onChange={(event) => { void importResource(event.target.files); event.target.value = ''; }} />
       <header className="topbar">
         <div className="brand-lockup"><div className="forge-mark"><span /></div><div className="brand-name">FORGE <b>STUDIO</b><small>LOCAL WORKSPACE</small></div></div>
         <div className="top-divider" />
@@ -359,13 +435,15 @@ function App() {
           <span className="local-tag"><ShieldCheck size={13} /> LOCAL ONLY</span>
           <button className="toolbar-button" onClick={() => void saveLocal()} title="Save locally" data-testid="button-save-local"><Save size={14} /><span>Save</span></button>
           <button className="toolbar-button" onClick={showProjects} title="Open local project" data-testid="button-open-project"><FolderOpen size={14} /><span>Open</span></button>
-          <button className="export-button" onClick={() => setExportOpen(true)} disabled={!root}><ArrowDownToLine size={14} /> Export</button>
+          <button className="toolbar-button resource-toolbar" onClick={() => setResourceOpen(true)} title="Import or export a FiveM resource"><FolderOpen size={14} /><span>FiveM resource</span>{resourcePackage && <b>{resourcePackage.files.length}</b>}</button>
+          <button className="export-button" onClick={() => setExportOpen(true)} disabled={!root && !resourcePackage}><ArrowDownToLine size={14} /> Export</button>
         </div>
       </header>
       <nav className="menu-strip" aria-label="Workspace actions">
         <button onClick={clearScene}>New project</button>
         <button onClick={showProjects}>Open local…</button>
         <button onClick={() => void saveLocal(true)}>Save as…</button>
+        <button onClick={() => setResourceOpen(true)}>FiveM resource…</button>
         <button onClick={() => openImport('replace')}>Replace scene…</button>
         <span className="menu-separator" />
         <button onClick={undo} disabled={!history.current.length} aria-label="Undo"><RotateCcw size={13} /> Undo</button>
@@ -382,7 +460,7 @@ function App() {
             {!root ? <div className="scene-empty"><div className="empty-glyph"><Box size={18} /></div><b>Scene is empty</b><span>Import a model to begin working.</span><button onClick={() => openImport('append')}><Upload size={13} /> Import model</button></div> :
               <SceneTree root={root} selectedId={selectedId} query={sceneQuery} onSelect={setSelection} onRename={renameObject} onDuplicate={duplicateObject} onDelete={deleteObject} onVisible={toggleVisible} onLock={toggleLock} />}
           </div>
-          <div className="native-note"><span className="native-kicker">NATIVE GAME FILES</span><p>Not supported in-browser</p><div>{unsupportedGame.map((ext) => <code key={ext}>{ext}</code>)}</div><small>Use Sollumz or Rage CLI for verified GTA workflows.</small></div>
+          <div className="native-note"><span className="native-kicker">FIVEM RESOURCE</span><p>{resourcePackage ? `${resourcePackage.name} · ${resourcePackage.files.length} files` : 'ZIP and folder packaging'}</p><div>{unsupportedGame.map((ext) => <code key={ext}>{ext}</code>)}</div><small>{resourcePackage ? 'Native files are preserved for export; preview and binary editing need a GTA-format tool.' : 'Import a ZIP or folder to preserve native assets and package them for FiveM.'}</small>{resourcePackage && <button className="resource-note-button" onClick={() => setResourceOpen(true)}>Browse resource files</button>}</div>
         </aside>}
         <section className="viewport-column">
           <div className="viewport-toolbar">
@@ -403,7 +481,7 @@ function App() {
           </div>
           <div className="view-stage">
             <Viewport root={root} grid={grid} axes={axes} wireframe={wireframe} orthographic={ortho} background={background} onSelect={setSelection} />
-            {!root && <div className="welcome-card"><div className="welcome-symbol"><Box size={21} strokeWidth={1.5} /></div><span className="eyebrow">A LOCAL 3D WORKBENCH</span><h1>Bring your model<br />into focus.</h1><p>Inspect standard 3D assets, tune materials, and export a clean handoff for your next tool.</p><div className="welcome-actions"><button className="primary-action" onClick={() => openImport('append')}><Upload size={15} /> Import a model</button><button className="secondary-action" onClick={showProjects}><FolderOpen size={15} /> Open project</button></div><small>GLB · GLTF · OBJ · STL <span>·</span> processed in this browser</small></div>}
+            {!root && <div className="welcome-card"><div className="welcome-symbol"><Box size={21} strokeWidth={1.5} /></div><span className="eyebrow">LOCAL 3D + FIVEM RESOURCE WORKSPACE</span><h1>Bring your model<br />into focus.</h1><p>Inspect standard 3D assets, or import and package an existing FiveM vehicle resource.</p><div className="welcome-actions"><button className="primary-action" onClick={() => openImport('append')}><Upload size={15} /> Import a model</button><button className="secondary-action" onClick={() => setResourceOpen(true)}><FolderOpen size={15} /> FiveM resource</button></div><small>3D preview: GLB · GLTF · OBJ · STL <span>·</span> GTA files preserved in resource ZIPs</small></div>}
             {dragging && <div className="drag-overlay"><div className="drag-target"><Upload size={24} /><b>Drop models to add to scene</b><span>Existing objects will be kept</span></div></div>}
             {busy && <div className="busy-chip"><span className="busy-dot" /><span>{busy.label}</span><div className="progress-track"><i style={{ width: `${busy.progress}%` }} /></div><span className="mono">{busy.progress}%</span></div>}
             <div className="view-corner view-corner-top"><span className="corner-dot" /> {format === '—' ? 'NO ASSET' : `${format} · LOCAL`}</div>
@@ -453,10 +531,21 @@ function App() {
             </div>}
         </aside>}
       </div>
-      <footer className="bottom-note"><span>FORGE STUDIO <i>·</i> BROWSER WORKSHOP</span><span>YFT / YTD / YDR / YDD / YBN are not supported. No native GTA conversion is performed.</span><span>V 0.1.0</span></footer>
+      <footer className="bottom-note"><span>FORGE STUDIO <i>·</i> BROWSER WORKSHOP</span><span>FiveM ZIPs preserve native files; GTA binary editing and conversion are not available here.</span><span>V 0.2.0</span></footer>
       {notice && <div className={`notice notice-${notice.kind}`} role="status"><span>{notice.kind === 'success' ? <Check size={14} /> : notice.kind === 'error' ? <X size={14} /> : <CircleHelp size={14} />}</span>{notice.message}<button onClick={() => setNotice(null)} aria-label="Dismiss message"><X size={13} /></button></div>}
-      {exportOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) setExportOpen(false); }}><section className="dialog export-dialog" role="dialog" aria-modal="true" aria-labelledby="export-title"><div className="dialog-header"><div><span className="eyebrow">GENERATE FILE</span><h2 id="export-title">Export scene</h2></div><IconButton icon={X} label="Close export" onClick={() => setExportOpen(false)} /></div><p className="dialog-intro">A file is generated from the current scene and downloaded directly to your device.</p><label className="form-label">Filename<input value={exportName} onChange={(e) => setExportName(e.target.value)} data-testid="input-export-filename" /></label><div className="export-options">{(['glb', 'gltf', 'obj', 'stl'] as const).map((kind) => <button key={kind} className="export-choice" onClick={() => void exportScene(kind)}><div className="format-chip">{kind.toUpperCase()}</div><div><b>{kind === 'glb' ? 'GLB · Single file' : kind === 'gltf' ? 'GLTF · ZIP package' : kind === 'obj' ? 'OBJ + MTL · ZIP' : 'STL · Geometry only'}</b><small>{kind === 'glb' ? 'Binary scene with embedded materials and textures' : kind === 'gltf' ? 'JSON scene packaged with its resources' : kind === 'obj' ? 'Mesh data and a basic material definition' : 'Warning: materials and textures are not included'}</small></div><ChevronRight size={15} /></button>)}</div><div className="native-warning"><ShieldCheck size={14} /><span>These are standard 3D exports, <b>not FiveM-ready GTA assets.</b> Use specialist tools for native game formats.</span></div></section></div>}
+      {exportOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) setExportOpen(false); }}><section className="dialog export-dialog" role="dialog" aria-modal="true" aria-labelledby="export-title"><div className="dialog-header"><div><span className="eyebrow">GENERATE FILE</span><h2 id="export-title">Export {root ? 'scene' : 'resource'}</h2></div><IconButton icon={X} label="Close export" onClick={() => setExportOpen(false)} /></div><p className="dialog-intro">Downloads are generated locally and saved directly to your device.</p>{resourcePackage && <button className="export-choice" onClick={() => void exportResource()}><div className="format-chip">ZIP</div><div><b>{resourcePackage.name} · FiveM resource</b><small>{resourcePackage.files.length} source files · native GTA files kept intact{resourcePackage.hasManifest ? ' · original manifest preserved' : ' · fxmanifest.lua added on export'}</small></div><ChevronRight size={15} /></button>}{root && <><label className="form-label">Filename<input value={exportName} onChange={(e) => setExportName(e.target.value)} data-testid="input-export-filename" /></label><div className="export-options">{(['glb', 'gltf', 'obj', 'stl'] as const).map((kind) => <button key={kind} className="export-choice" onClick={() => void exportScene(kind)}><div className="format-chip">{kind.toUpperCase()}</div><div><b>{kind === 'glb' ? 'GLB · Single file' : kind === 'gltf' ? 'GLTF · ZIP package' : kind === 'obj' ? 'OBJ + MTL · ZIP' : 'STL · Geometry only'}</b><small>{kind === 'glb' ? 'Binary scene with embedded materials and textures' : kind === 'gltf' ? 'JSON scene packaged with its resources' : kind === 'obj' ? 'Mesh data and a basic material definition' : 'Warning: materials and textures are not included'}</small></div><ChevronRight size={15} /></button>)}</div><div className="native-warning"><ShieldCheck size={14} /><span>Standard 3D exports are <b>not native GTA assets.</b> Specialist tools are needed to convert them.</span></div></>}</section></div>}
       {projectOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) setProjectOpen(false); }}><section className="dialog projects-dialog" role="dialog" aria-modal="true" aria-labelledby="projects-title"><div className="dialog-header"><div><span className="eyebrow">THIS BROWSER ONLY</span><h2 id="projects-title">Local projects</h2></div><IconButton icon={X} label="Close projects" onClick={() => setProjectOpen(false)} /></div><p className="dialog-intro">Project data is stored in this browser's local database. It is never uploaded.</p><div className="project-list scrollbar-thin">{projects.length ? projects.map((project) => <button className="project-row" key={project.id} onClick={() => void openLocal(project.id)}><div className="project-file"><Box size={16} /></div><div><b>{project.name}</b><small>Saved {new Date(project.updatedAt).toLocaleString()} · {project.sources.length} source file{project.sources.length === 1 ? '' : 's'}</small></div><ChevronRight size={14} /></button>) : <div className="project-list-empty"><HardDrive size={19} /><b>No saved projects</b><span>Save a scene locally to find it here.</span></div>}</div><div className="dialog-footer"><button className="secondary-action" onClick={() => { setProjectOpen(false); clearScene(); }}><FilePlus2 size={14} /> New project</button><button className="primary-action" onClick={() => setProjectOpen(false)}>Done</button></div></section></div>}
+      <ResourcePackageDialog
+        open={resourceOpen}
+        packageName={resourcePackage?.name || ''}
+        files={resourcePackage?.files.map(({ path, file, kind }) => ({ path, size: file.size, kind })) || []}
+        hasManifest={Boolean(resourcePackage?.hasManifest)}
+        onClose={closeResourceDialog}
+        onImportZip={() => resourcePicker.current?.click()}
+        onImportFolder={() => resourceFolderPicker.current?.click()}
+        onExport={() => void exportResource()}
+        onClear={() => { setResourcePackage(null); setNotice({ kind: 'info', message: 'Resource package cleared.' }); }}
+      />
     </main>
   );
 }
