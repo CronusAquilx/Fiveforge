@@ -50,6 +50,34 @@ function normalizeAssetPath(path: string, base = '') {
   return parts.join('/').toLowerCase();
 }
 
+function hasGenericMeshName(name: string) {
+  return !name.trim() || /^(?:mesh|object|geometry|primitive|shape)(?:[._\s-]*\d+)?$/i.test(name.trim());
+}
+
+function makeMeshNamesUseful(root: THREE.Object3D) {
+  const names = new Map<string, number>();
+  let index = 0;
+  root.traverse((node) => {
+    const mesh = node as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    index++;
+    if (!hasGenericMeshName(mesh.name)) return;
+
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    const materialName = materials.map((material) => material.name.trim()).find((name) => !hasGenericMeshName(name));
+    const parentName = mesh.parent && mesh.parent !== root && !hasGenericMeshName(mesh.parent.name)
+      ? mesh.parent.name
+      : '';
+    let name = materialName || (parentName ? `${parentName} part` : `Vehicle part ${index.toString().padStart(2, '0')}`);
+    name = name.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    name = name.charAt(0).toUpperCase() + name.slice(1);
+    const key = name.toLocaleLowerCase();
+    const count = (names.get(key) || 0) + 1;
+    names.set(key, count);
+    mesh.name = count === 1 ? name : `${name} · ${count}`;
+  });
+}
+
 function safeArchivePath(path: string) {
   const normalized = path.replace(/\\/g, '/');
   if (normalized.startsWith('/') || /^[a-z]:/i.test(normalized) || normalized.split('/').includes('..')) {
@@ -241,6 +269,7 @@ export async function loadAsset(files: File[]): Promise<LoadedAsset> {
     root = mesh;
   }
   root.name ||= model.name.replace(/\.[^.]+$/, '');
+  makeMeshNamesUseful(root);
   root.updateMatrixWorld(true);
   window.setTimeout(() => urlsByPath.forEach((url) => URL.revokeObjectURL(url)), 30000);
   return { root, name: model.name.replace(/\.[^.]+$/, ''), format: ext.toUpperCase(), source: files };

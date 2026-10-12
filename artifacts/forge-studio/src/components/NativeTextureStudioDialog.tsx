@@ -145,9 +145,26 @@ export default function NativeTextureStudioDialog({ resource, onClose, onReplace
     setError('');
     setSuccess('');
     try {
-      const preview = await previewNativeYft(selectedYft.file, ytdFiles.map((item) => item.file));
+      const modelStem = selectedYft.path.split('/').pop()?.replace(/\.yft$/i, '').replace(/_hi$/i, '').toLocaleLowerCase() || '';
+      const orderedYtds = [
+        ...ytdFiles.filter((item) => item.path.split('/').pop()?.replace(/\.ytd$/i, '').toLocaleLowerCase() === modelStem),
+        ...ytdFiles.filter((item) => item.path.split('/').pop()?.replace(/\.ytd$/i, '').toLocaleLowerCase() !== modelStem),
+      ];
+      const previewYtds: File[] = [];
+      let totalBytes = selectedYft.file.size;
+      for (const item of orderedYtds) {
+        if (previewYtds.length >= 24 || totalBytes + item.file.size > MAX_NATIVE_UPLOAD) continue;
+        previewYtds.push(item.file);
+        totalBytes += item.file.size;
+      }
+      const preview = await previewNativeYft(selectedYft.file, previewYtds);
       await onPreviewModel(preview.model);
-      setSuccess(`Showing ${preview.meshCount} YFT meshes${preview.textureCount ? ` with ${preview.textureCount} matched textures` : ''} in the regular editor. The preview can be edited and exported as GLB; the native YFT stays unchanged.`);
+      const textureStatus = preview.textureCount
+        ? `${preview.textureCount} YTD textures matched`
+        : previewYtds.length
+          ? 'no YTD texture names matched the model'
+          : 'no matching YTD was available';
+      setSuccess(`Showing ${preview.meshCount} YFT meshes; ${textureStatus}. Use the resource ZIP export to keep YFTs and rebuilt YTDs together. Viewport geometry edits export as GLB.`);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not preview this YFT.');
     } finally {

@@ -6,6 +6,7 @@ export type NativeYftPreview = {
   skippedMeshCount: number;
   textureCount: number;
   usedTextures: string[];
+  unmatchedTextures: string[];
 };
 
 async function toBase64(file: File) {
@@ -53,6 +54,7 @@ export async function previewNativeYft(modelFile: File, textureFiles: File[] = [
     skippedMeshCount?: number;
     textureCount?: number;
     usedTextures?: string[];
+    unmatchedTextures?: string[];
   };
   if (!response.ok) throw new Error(data.error || 'The YFT could not be converted for preview.');
   if (!data.modelBase64 || !data.meshCount) throw new Error('The YFT reader returned an empty model preview.');
@@ -64,5 +66,6 @@ export async function previewNativeYft(modelFile: File, textureFiles: File[] = [
     skippedMeshCount: data.skippedMeshCount || 0,
     textureCount: data.textureCount || 0,
     usedTextures: data.usedTextures || [],
+    unmatchedTextures: data.unmatchedTextures || [],
   };
 }

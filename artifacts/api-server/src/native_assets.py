@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import re
 import sys
 from typing import Any
 
@@ -12,6 +13,40 @@ from fivefury.ytd import Texture, TextureFormat, read_ytd
 
 MAX_FILE_BYTES = 250 * 1024 * 1024
 MAX_PREVIEW_PIXELS = 40_000_000
+
+
+def texture_key(value: str) -> str:
+    leaf = value.replace("\\", "/").rsplit("/", 1)[-1].strip().casefold()
+    leaf = re.sub(r"\.(dds|png|jpe?g|webp|bmp|tga)$", "", leaf)
+    return re.sub(r"[^a-z0-9]", "", leaf)
+
+
+def texture_reference_name(reference: Any) -> str:
+    if isinstance(reference, str):
+        return reference.strip()
+    name = getattr(reference, "name", "")
+    if name:
+        return str(name).strip()
+    if isinstance(reference, dict):
+        return str(reference.get("name") or reference.get("texture") or "").strip()
+    return ""
+
+
+def display_mesh_name(source_name: str, material_name: str, index: int, duplicates: dict[str, int]) -> str:
+    generic = re.compile(r"^(?:mesh|object|geometry|primitive|shape)(?:[._\s-]*\d+)?$", re.IGNORECASE)
+    name = source_name.strip()
+    if not name or generic.fullmatch(name):
+        name = material_name.strip()
+    if not name or generic.fullmatch(name) or name.casefold() in {"default", "material", "none"}:
+        name = f"Vehicle part {index + 1:02d}"
+    else:
+        name = re.sub(r"[_-]+", " ", name).strip()
+        name = re.sub(r"\s+", " ", name)
+        if name.islower():
+            name = name.title()
+    duplicates[name.casefold()] = duplicates.get(name.casefold(), 0) + 1
+    count = duplicates[name.casefold()]
+    return f"{name} · {count}" if count > 1 else name
 
 
 def decode_base64(value: Any, label: str) -> bytes:
@@ -144,6 +179,7 @@ def preview_yft(payload: dict[str, Any]) -> dict[str, Any]:
     import trimesh
 
     texture_images: dict[str, Image.Image] = {}
+    texture_names: dict[str, str] = {}
     total_pixels = 0
     for dictionary in dictionaries:
         if not isinstance(dictionary, dict):
@@ -155,7 +191,14 @@ def preview_yft(payload: dict[str, Any]) -> dict[str, Any]:
             if total_pixels > MAX_PREVIEW_PIXELS:
                 break
             try:
-                texture_images[texture.name.casefold()] = image_from_texture(texture)
+                image = image_from_texture(texture)
+                exact_key = texture.name.strip().casefold()
+                canonical_key = texture_key(texture.name)
+                texture_images[exact_key] = image
+                texture_names[exact_key] = texture.name
+                if canonical_key:
+                    texture_images[canonical_key] = image
+                    texture_names[canonical_key] = texture.name
             except Exception:
                 continue
         if total_pixels > MAX_PREVIEW_PIXELS:
@@ -175,7 +218,9 @@ def preview_yft(payload: dict[str, Any]) -> dict[str, Any]:
 
     scene = trimesh.Scene()
     used_textures: set[str] = set()
+    unmatched_textures: set[str] = set()
     skipped = 0
+    mesh_names: dict[str, int] = {}
     for index, source in enumerate(meshes):
         positions = vector_rows(source.positions)
         indices = [int(value) for value in source.indices]
@@ -197,17 +242,35 @@ def preview_yft(payload: dict[str, Any]) -> dict[str, Any]:
             mesh.vertex_normals = np.asarray([row[:3] for row in normals], dtype=np.float32)
 
         source_material = source.material
-        material_name = getattr(source_material, "name", "") or f"Material {index + 1}"
+        material_name = str(getattr(source_material, "name", "") or "")
         texture_name = None
         if source_material is not None:
             for slot in ("DiffuseSampler", "DiffuseSampler2", "BaseColorSampler", "AlbedoSampler"):
-                reference = source_material.get_texture(slot)
-                if reference is not None and reference.name:
-                    texture_name = reference.name
+                try:
+                    reference = source_material.get_texture(slot)
+                except (AttributeError, KeyError, TypeError, ValueError):
+                    reference = None
+                reference_name = texture_reference_name(reference)
+                if reference_name:
+                    texture_name = reference_name
                     break
             if not texture_name and source_material.textures:
-                texture_name = source_material.textures[0].name
-        image = texture_images.get(texture_name.casefold()) if texture_name else None
+                texture_name = texture_reference_name(source_material.textures[0])
+        image = None
+        if texture_name:
+            leaf_name = texture_name.replace("\\", "/").rsplit("/", 1)[-1].strip()
+            image = texture_images.get(leaf_name.casefold()) or texture_images.get(texture_key(leaf_name))
+            if image is None:
+                reference_key = texture_key(leaf_name)
+                matches = {
+                    id(candidate): candidate
+                    for key, candidate in texture_images.items()
+                    if len(key) >= 4 and (key.endswith(reference_key) or reference_key.endswith(key))
+                } if len(reference_key) >= 4 else {}
+                if len(matches) == 1:
+                    image = next(iter(matches.values()))
+            if image is None:
+                unmatched_textures.add(leaf_name)
         uv_channels = source.texcoords or []
         if uv_channels and len(uv_channels[0]) == len(positions) and image is not None:
             uv = np.asarray([[float(point.x), float(point.y)] for point in uv_channels[0]], dtype=np.float32)
@@ -224,8 +287,8 @@ def preview_yft(payload: dict[str, Any]) -> dict[str, Any]:
                 vertex_colors=np.tile(np.array([164, 164, 160, 255], dtype=np.uint8), (len(positions), 1)),
             )
 
-        name = getattr(source, "name", "") or f"vehicle_mesh_{index + 1}"
-        scene.add_geometry(mesh, geom_name=f"{name}_{index}", node_name=f"{name}_{index}")
+        name = display_mesh_name(str(getattr(source, "name", "") or ""), material_name, index, mesh_names)
+        scene.add_geometry(mesh, geom_name=name, node_name=name)
 
     if not scene.geometry:
         raise ValueError("No usable render meshes were found in this YFT.")
@@ -239,6 +302,7 @@ def preview_yft(payload: dict[str, Any]) -> dict[str, Any]:
         "skippedMeshCount": skipped,
         "textureCount": len(used_textures),
         "usedTextures": sorted(used_textures),
+        "unmatchedTextures": sorted(unmatched_textures),
     }
 
 

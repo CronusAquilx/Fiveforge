@@ -1,0 +1,41 @@
+.transform-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.transform-tools .tool-toggle {
+  min-width: 43px;
+  justify-content: center;
+}
+
+.transform-tools .tool-toggle.selected {
+  color: #f7d989;
+  border-color: #98763b;
+  background: #433720;
+  box-shadow: inset 0 0 0 1px #f1c46133;
+}
+
+.transform-tools .tool-toggle:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.tree-row.selected {
+  color: #ffe6a1;
+  background: #44371f;
+  box-shadow: inset 3px 0 #ffc247, inset 0 0 0 1px #94702e66;
+}
+
+.tree-row.selected .tree-select,
+.tree-row.selected .tree-select svg {
+  color: #ffe6a1;
+}
+
+@media (max-width: 767px) {
+  .transform-tools .tool-toggle {
+    min-width: 38px;
+    padding-inline: 4px;
+    font-size: 9px;
+  }
+}

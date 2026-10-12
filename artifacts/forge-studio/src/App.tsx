@@ -11,6 +11,7 @@ import { Viewport } from '@/components/Viewport';
 import ResourcePackageDialog from '@/components/ResourcePackageDialog';
 import NativeTextureStudioDialog from '@/components/NativeTextureStudioDialog';
 import './native-texture-studio.css';
+import './viewport-tools.css';
 import { downloadBlob, expandArchives, exportModel, loadAsset, MAX_FILE_SIZE, validateFiles } from '@/lib/model-io';
 import { getProject, listProjects, saveProject, type LocalProject } from '@/lib/projects';
 import { buildFiveMResourceZip, readResourcePackage, type ResourcePackage } from '@/lib/resource-package';
@@ -88,6 +89,7 @@ function App() {
   const [axes, setAxes] = useState(true);
   const [wireframe, setWireframe] = useState(false);
   const [ortho, setOrtho] = useState(false);
+  const [transformMode, setTransformMode] = useState<'translate' | 'rotate' | 'scale'>('translate');
   const [background, setBackground] = useState('#202124');
   const [showTree, setShowTree] = useState(() => window.innerWidth >= 768);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -188,7 +190,7 @@ function App() {
     });
     return copy;
   };
-  const walkFiles = async (files: File[], mode: 'append' | 'replace' = 'append', originalFiles = files): Promise<boolean> => {
+  const walkFiles = async (files: File[], mode: 'append' | 'replace' = 'append', originalFiles = files, preserveResource = false): Promise<boolean> => {
     let progressTimer = 0;
     try {
       const hasZip = files.some((file) => file.name.toLowerCase().endsWith('.zip'));
@@ -208,7 +210,11 @@ function App() {
       loadedAssets.forEach((loaded) => scene.add(loaded.root));
       const firstAsset = loadedAssets[0];
       scene.name = mode === 'replace' || !root ? firstAsset.name : scene.name;
-      setRoot(scene); setSceneRevision((v) => v + 1); setSelection(firstAsset.root); setFormat(loadedAssets.map((item) => item.format).join(' + '));
+      if (mode === 'replace' && !preserveResource) {
+        setResourcePackage(null);
+        setResourceOpen(false);
+      }
+      setRoot(scene); setSceneRevision((v) => v + 1); setSelection(meshFrom(firstAsset.root) || firstAsset.root); setFormat(loadedAssets.map((item) => item.format).join(' + '));
        setSourceFiles((existing) => mode === 'replace' ? originalFiles : [...existing, ...originalFiles]);
       setProjectName(mode === 'replace' || !root ? firstAsset.name : projectName);
       setDirty(true); history.current = []; future.current = [];
@@ -239,6 +245,13 @@ function App() {
     if (!files?.length) return;
     const list = Array.from(files);
     if (list.some((file) => !file.name.toLowerCase().endsWith('.zip') && file.size > MAX_FILE_SIZE)) { setNotice({ kind: 'error', message: 'Files must be smaller than 250 MB.' }); return; }
+    if (list.some((file) => file.name.toLowerCase().endsWith('.zip'))) {
+      void (async () => {
+        const isResource = await importResource(list);
+        if (!isResource) await walkFiles(list, mode);
+      })();
+      return;
+    }
     const nativeExtensions = ['yft', 'ytd', 'ydr', 'ydd', 'ybn', 'ytyp', 'ymap', 'ymf', 'ycd', 'ymt', 'yld', 'ypt', 'meta'];
     const pickedExtensions = list.map((file) => file.name.split('.').pop()?.toLowerCase() || '');
     const hasResourceManifest = list.some((file) => ['fxmanifest.lua', '__resource.lua'].includes(file.name.split('/').pop()?.toLowerCase() || ''));
@@ -259,18 +272,43 @@ function App() {
     }
     void walkFiles(list, mode);
   };
-  const loadYftIntoScene = async (files: File[], modelFile: File, mode: 'append' | 'replace') => {
+  const loadYftIntoScene = async (files: File[], modelFile: File, mode: 'append' | 'replace', packageOverride?: ResourcePackage) => {
     setBusy({ label: `Converting ${modelFile.name} for the viewport`, progress: 12 });
     try {
+      const resource = packageOverride || await readResourcePackage(files);
+      setResourcePackage(resource);
+      setResourceOpen(false);
       const ytdFiles = files.filter((file) => file.name.toLowerCase().endsWith('.ytd'));
-      const preview = await previewNativeYft(modelFile, ytdFiles);
+      const modelStem = modelFile.name.replace(/\.yft$/i, '').replace(/_hi$/i, '').toLocaleLowerCase();
+      const prioritizedYtds = [
+        ...ytdFiles.filter((file) => file.name.replace(/\.ytd$/i, '').toLocaleLowerCase() === modelStem),
+        ...ytdFiles.filter((file) => file.name.replace(/\.ytd$/i, '').toLocaleLowerCase() !== modelStem),
+      ];
+      const selectedYtds: File[] = [];
+      let previewBytes = modelFile.size;
+      for (const file of prioritizedYtds) {
+        if (selectedYtds.length >= 24 || previewBytes + file.size > MAX_FILE_SIZE) continue;
+        selectedYtds.push(file);
+        previewBytes += file.size;
+      }
+      const preview = await previewNativeYft(modelFile, selectedYtds);
       const otherModels = files.filter((file) => ['glb', 'gltf', 'obj', 'stl'].includes(file.name.split('.').pop()?.toLowerCase() || ''));
-      const loaded = await walkFiles([preview.model, ...otherModels, ...files.filter((file) => ![modelFile, ...ytdFiles, ...otherModels].includes(file))], mode, files);
+      const originalFiles = resource.files.map((item) => item.file);
+      const loaded = await walkFiles([preview.model, ...otherModels, ...files.filter((file) => ![modelFile, ...ytdFiles, ...otherModels].includes(file))], mode, originalFiles, true);
       if (!loaded) return;
-      setFormat('YFT preview · GLB conversion');
+      setFormat(`${modelFile.name} · YFT preview`);
+      const textureStatus = preview.textureCount
+        ? `${preview.textureCount} YTD texture${preview.textureCount === 1 ? '' : 's'} matched`
+        : selectedYtds.length
+          ? 'no YTD textures matched the model material references'
+          : 'no matching YTD was available for preview';
+      const unmatched = preview.unmatchedTextures.length
+        ? ` Unmatched texture names: ${preview.unmatchedTextures.slice(0, 3).join(', ')}${preview.unmatchedTextures.length > 3 ? '…' : ''}.`
+        : '';
+      const omitted = selectedYtds.length < ytdFiles.length ? ' Some YTDs were skipped to stay within preview limits.' : '';
       setNotice({
-        kind: 'success',
-        message: `Loaded ${preview.meshCount} YFT meshes${preview.textureCount ? ` with ${preview.textureCount} matched textures` : ''} into the regular editor. Edit the preview and export it as GLB; native YFT rebuilding is not available.`,
+        kind: preview.textureCount ? 'success' : 'info',
+        message: `Loaded ${preview.meshCount} YFT meshes; ${textureStatus}.${unmatched}${omitted} Export a source-preserving resource ZIP for the original YFT and YTD files. Viewport geometry edits export as GLB, not native YFT.`,
       });
     } catch (error) {
       setBusy(null);
@@ -325,7 +363,6 @@ function App() {
   const updateMaterial = (key: 'color' | 'roughness' | 'metalness', value: string | number) => {
     if (!standard) return;
     if (selected?.userData.forgeLocked) { setNotice({ kind: 'info', message: 'Unlock this object in the scene tree before editing it.' }); return; }
-    snapshot();
     snapshot();
     if (key === 'color') standard.color.set(value as string);
     else standard[key] = Number(value);
@@ -387,12 +424,12 @@ function App() {
     context.drawImage(image, 0, 0);
     canvas.toBlob((blob) => { if (blob) downloadBlob(blob, `${activeMesh?.name || 'texture'}-basecolor.png`); });
   };
-  const importResource = async (picked: FileList | null) => {
-    if (!picked?.length) return;
+  const importResource = async (picked: FileList | File[] | null): Promise<boolean> => {
+    if (!picked?.length) return false;
     const files = Array.from(picked);
     if (files.some((file) => !file.name.toLowerCase().endsWith('.zip') && file.size > MAX_FILE_SIZE)) {
       setNotice({ kind: 'error', message: 'Resource files must be smaller than 250 MB each.' });
-      return;
+      return false;
     }
     setBusy({ label: 'Reading FiveM resource', progress: 4 });
     try {
@@ -400,14 +437,28 @@ function App() {
         setBusy({ label: `Unpacking ${label} (${completed}/${total})`, progress: Math.min(88, 8 + Math.round((completed / total) * 78)) });
       });
       setResourcePackage(resource);
-      setResourceOpen(true);
-      const nativeCount = resource.files.filter((file) => file.kind === 'native').length;
-      setNotice({
-        kind: 'success',
-        message: `${resource.name} imported · ${resource.files.length} files${nativeCount ? ` · ${nativeCount} native GTA assets preserved` : ''}`,
-      });
+      setProjectName(resource.name);
+      setSourceFiles(resource.files.map((item) => item.file));
+      const yfts = resource.files.filter((item) => item.path.toLowerCase().endsWith('.yft'));
+      if (yfts.length) {
+        const model = yfts.find((item) => /_hi\.yft$/i.test(item.path)) || yfts[0];
+        const previewFiles = [
+          model.file,
+          ...resource.files.filter((item) => item.path.toLowerCase().endsWith('.ytd')).map((item) => item.file),
+        ];
+        await loadYftIntoScene(previewFiles, model.file, 'replace', resource);
+      } else {
+        setResourceOpen(true);
+        const nativeCount = resource.files.filter((file) => file.kind === 'native').length;
+        setNotice({
+          kind: 'success',
+          message: `${resource.name} imported · ${resource.files.length} files${nativeCount ? ` · ${nativeCount} native GTA assets preserved` : ''}`,
+        });
+      }
+      return true;
     } catch (error) {
       setNotice({ kind: 'error', message: error instanceof Error ? error.message : 'Could not read this FiveM resource.' });
+      return false;
     } finally {
       setBusy(null);
     }
@@ -429,10 +480,11 @@ function App() {
     }
   };
   const previewNativeModel = async (file: File) => {
-    const loaded = await walkFiles([file], 'replace');
+    const preservedSources = resourcePackage?.files.map((item) => item.file) || sourceFiles;
+    const loaded = await walkFiles([file], 'replace', preservedSources.length ? preservedSources : [file], true);
     if (loaded) {
       setFormat('YFT model preview');
-      setNotice({ kind: 'success', message: 'YFT preview loaded in the regular editor. Edit the preview and export as GLB; the original native YFT stays unchanged in its resource.' });
+      setNotice({ kind: 'success', message: 'YFT preview loaded with its resource files. Export the resource ZIP to keep the original YFT and rebuilt YTD; viewport geometry edits export as GLB.' });
     }
   };
   const replaceNativeFile = (path: string, file: File) => {
@@ -511,6 +563,23 @@ function App() {
             <div className="viewport-left-tools">
               {!showTree && <IconButton icon={Menu} label="Show scene panel" onClick={() => setShowTree(true)} />}
               <span className="toolbar-caption">VIEWPORT</span><span className="view-sep" />
+              <div className="transform-tools" role="group" aria-label="Transform tools">
+                {([
+                  ['translate', 'Move'],
+                  ['rotate', 'Rotate'],
+                  ['scale', 'Scale'],
+                ] as const).map(([mode, label]) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    className={`tool-toggle${transformMode === mode ? ' selected' : ''}`}
+                    aria-pressed={transformMode === mode}
+                    disabled={!root || Boolean(selected?.userData.forgeLocked)}
+                    onClick={() => setTransformMode(mode)}
+                  >{label}</button>
+                ))}
+              </div>
+              <span className="view-sep" />
               <button className={`tool-toggle${grid ? ' selected' : ''}`} onClick={() => setGrid(!grid)} aria-pressed={grid}><Grid2X2 size={14} /><span>Grid</span></button>
               <button className={`tool-toggle${axes ? ' selected' : ''}`} onClick={() => setAxes(!axes)} aria-pressed={axes}><Axis3D size={14} /><span>Axes</span></button>
               <button className={`tool-toggle${wireframe ? ' selected' : ''}`} onClick={() => setWireframe(!wireframe)} aria-pressed={wireframe}><Activity size={14} /><span>Wire</span></button>
@@ -524,7 +593,20 @@ function App() {
             </div>
           </div>
           <div className="view-stage">
-            <Viewport root={root} grid={grid} axes={axes} wireframe={wireframe} orthographic={ortho} background={background} onSelect={setSelection} />
+            <Viewport
+              root={root}
+              selected={root ? selected : null}
+              selectedLocked={Boolean(selected?.userData.forgeLocked)}
+              transformMode={transformMode}
+              grid={grid}
+              axes={axes}
+              wireframe={wireframe}
+              orthographic={ortho}
+              background={background}
+              onSelect={setSelection}
+              onTransformStart={snapshot}
+              onTransformChange={() => { setSceneRevision((value) => value + 1); setDirty(true); }}
+            />
             {!root && <div className="welcome-card"><div className="welcome-symbol"><Box size={21} strokeWidth={1.5} /></div><span className="eyebrow">LOCAL 3D + FIVEM RESOURCE WORKSPACE</span><h1>Bring your model<br />into focus.</h1><p>Open GLB, GLTF, OBJ, STL, or YFT models in the regular editor. Include matching YTDs for vehicle textures.</p><div className="welcome-actions"><button className="primary-action" onClick={() => openImport('append')}><Upload size={15} /> Import a model</button><button className="secondary-action" onClick={() => setResourceOpen(true)}><FolderOpen size={15} /> FiveM resource</button></div><small>YFT edits export as standard GLB; native YFT files stay unchanged.</small></div>}
             {dragging && <div className="drag-overlay"><div className="drag-target"><Upload size={24} /><b>Drop models to add to scene</b><span>Existing objects will be kept</span></div></div>}
             {busy && <div className="busy-chip"><span className="busy-dot" /><span>{busy.label}</span><div className="progress-track"><i style={{ width: `${busy.progress}%` }} /></div><span className="mono">{busy.progress}%</span></div>}
@@ -577,7 +659,7 @@ function App() {
       </div>
       <footer className="bottom-note"><span>FORGE STUDIO <i>·</i> BROWSER WORKSHOP</span><span>YFT preview uses a converted GLB; replaced textures are rebuilt into YTD dictionaries.</span><span>V 0.2.0</span></footer>
       {notice && <div className={`notice notice-${notice.kind}`} role="status"><span>{notice.kind === 'success' ? <Check size={14} /> : notice.kind === 'error' ? <X size={14} /> : <CircleHelp size={14} />}</span>{notice.message}<button onClick={() => setNotice(null)} aria-label="Dismiss message"><X size={13} /></button></div>}
-      {exportOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) setExportOpen(false); }}><section className="dialog export-dialog" role="dialog" aria-modal="true" aria-labelledby="export-title"><div className="dialog-header"><div><span className="eyebrow">GENERATE FILE</span><h2 id="export-title">Export {root ? 'scene' : 'resource'}</h2></div><IconButton icon={X} label="Close export" onClick={() => setExportOpen(false)} /></div><p className="dialog-intro">Downloads are generated locally and saved directly to your device.</p>{resourcePackage && <button className="export-choice" onClick={() => void exportResource()}><div className="format-chip">ZIP</div><div><b>{resourcePackage.name} · FiveM resource</b><small>{resourcePackage.files.length} source files · native GTA files kept intact{resourcePackage.hasManifest ? ' · original manifest preserved' : ' · fxmanifest.lua added on export'}</small></div><ChevronRight size={15} /></button>}{root && <><label className="form-label">Filename<input value={exportName} onChange={(e) => setExportName(e.target.value)} data-testid="input-export-filename" /></label><div className="export-options">{(['glb', 'gltf', 'obj', 'stl'] as const).map((kind) => <button key={kind} className="export-choice" onClick={() => void exportScene(kind)}><div className="format-chip">{kind.toUpperCase()}</div><div><b>{kind === 'glb' ? 'GLB · Single file' : kind === 'gltf' ? 'GLTF · ZIP package' : kind === 'obj' ? 'OBJ + MTL · ZIP' : 'STL · Geometry only'}</b><small>{kind === 'glb' ? 'Binary scene with embedded materials and textures' : kind === 'gltf' ? 'JSON scene packaged with its resources' : kind === 'obj' ? 'Mesh data and a basic material definition' : 'Warning: materials and textures are not included'}</small></div><ChevronRight size={15} /></button>)}</div><div className="native-warning"><ShieldCheck size={14} /><span>Standard 3D exports are <b>not native GTA assets.</b> Specialist tools are needed to convert them.</span></div></>}</section></div>}
+       {exportOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) setExportOpen(false); }}><section className="dialog export-dialog" role="dialog" aria-modal="true" aria-labelledby="export-title"><div className="dialog-header"><div><span className="eyebrow">GENERATE FILE</span><h2 id="export-title">Export {root ? 'scene' : 'resource'}</h2></div><IconButton icon={X} label="Close export" onClick={() => setExportOpen(false)} /></div><p className="dialog-intro">Downloads are generated locally and saved directly to your device.</p>{resourcePackage && <button className="export-choice" onClick={() => void exportResource()}><div className="format-chip">ZIP</div><div><b>{resourcePackage.name} · FiveM resource</b><small>{resourcePackage.files.length} source files · original YFT/YTD files included · texture replacements saved to YTD{resourcePackage.hasManifest ? ' · original manifest preserved' : ' · fxmanifest.lua added on export'}</small></div><ChevronRight size={15} /></button>}{root && <><label className="form-label">Filename<input value={exportName} onChange={(e) => setExportName(e.target.value)} data-testid="input-export-filename" /></label><div className="export-options">{(['glb', 'gltf', 'obj', 'stl'] as const).map((kind) => <button key={kind} className="export-choice" onClick={() => void exportScene(kind)}><div className="format-chip">{kind.toUpperCase()}</div><div><b>{kind === 'glb' ? 'GLB · Single file' : kind === 'gltf' ? 'GLTF · ZIP package' : kind === 'obj' ? 'OBJ + MTL · ZIP' : 'STL · Geometry only'}</b><small>{kind === 'glb' ? 'Binary scene with embedded materials and textures' : kind === 'gltf' ? 'JSON scene packaged with its resources' : kind === 'obj' ? 'Mesh data and a basic material definition' : 'Warning: materials and textures are not included'}</small></div><ChevronRight size={15} /></button>)}</div><div className="native-warning"><ShieldCheck size={14} /><span>Standard 3D exports are <b>not native GTA assets.</b> Specialist tools are needed to convert them. YFT geometry edits remain in the GLB export.</span></div></>}</section></div>}
       {projectOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) setProjectOpen(false); }}><section className="dialog projects-dialog" role="dialog" aria-modal="true" aria-labelledby="projects-title"><div className="dialog-header"><div><span className="eyebrow">THIS BROWSER ONLY</span><h2 id="projects-title">Local projects</h2></div><IconButton icon={X} label="Close projects" onClick={() => setProjectOpen(false)} /></div><p className="dialog-intro">Project data is stored in this browser's local database. It is never uploaded.</p><div className="project-list scrollbar-thin">{projects.length ? projects.map((project) => <button className="project-row" key={project.id} onClick={() => void openLocal(project.id)}><div className="project-file"><Box size={16} /></div><div><b>{project.name}</b><small>Saved {new Date(project.updatedAt).toLocaleString()} · {project.sources.length} source file{project.sources.length === 1 ? '' : 's'}</small></div><ChevronRight size={14} /></button>) : <div className="project-list-empty"><HardDrive size={19} /><b>No saved projects</b><span>Save a scene locally to find it here.</span></div>}</div><div className="dialog-footer"><button className="secondary-action" onClick={() => { setProjectOpen(false); clearScene(); }}><FilePlus2 size={14} /> New project</button><button className="primary-action" onClick={() => setProjectOpen(false)}>Done</button></div></section></div>}
       <ResourcePackageDialog
         open={resourceOpen}
