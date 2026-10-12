@@ -88,22 +88,33 @@ function inlineVehicleParts(name: string): InlineVehiclePart[] {
     eight: '8', nine: '9', ten: '10', eleven: '11', twelve: '12', thirteen: '13', fourteen: '14',
     fifteen: '15', sixteen: '16', seventeen: '17', eighteen: '18', nineteen: '19', twenty: '20',
   };
+  const compactIndex = '(?:\\d+|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)';
   const addExtra = (value: string, rawVariant = '') => {
     const variant = ({ flip: 'flipped', flipped: 'flipped', reverse: 'reversed', reversed: 'reversed', mirror: 'mirrored', mirrored: 'mirrored' } as Record<string, string>)[rawVariant.toLowerCase()] || '';
     const rawValue = value.toLowerCase();
-    const normalizedValue = indexWords[rawValue] || rawValue;
+    const normalizedValue = (indexWords[rawValue] || rawValue).replace(/^0+(?=\d)/, '');
     const labelValue = normalizedValue.replace(/([a-z])(\d)/g, '$1 $2').replace(/[_-]+/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
     const id = `extra:${normalizedValue}:${variant || 'normal'}`;
     parts.set(id, { id, label: `Extra ${labelValue}${variant ? ` · ${variant[0].toUpperCase()}${variant.slice(1)}` : ''}`, category: 'extra' });
   };
-  const prefixVariant = /(?<![a-z0-9])(flipped|flip|reversed|reverse|mirrored|mirror)[_.\s·-]*extra[_.\s·-]*([a-z0-9]+)(?![a-z0-9])/gi;
-  const suffixVariant = /(?<![a-z0-9])extra[_.\s·-]*([a-z0-9]+)(?:[_.\s·-]*(flipped|flip|reversed|reverse|mirrored|mirror))?(?![a-z0-9])/gi;
-  const middleVariant = /(?<![a-z0-9])extra[_.\s·-]*(flipped|flip|reversed|reverse|mirrored|mirror)[_.\s·-]*([a-z0-9]+)(?![a-z0-9])/gi;
-  const variantWords = new Set(['flipped', 'flip', 'reversed', 'reverse', 'mirrored', 'mirror']);
-  for (const match of name.matchAll(prefixVariant)) addExtra(match[2], match[1]);
-  for (const match of name.matchAll(middleVariant)) addExtra(match[2], match[1]);
-  for (const match of name.matchAll(suffixVariant)) {
-    if (!variantWords.has(match[1].toLowerCase())) addExtra(match[1], match[2] || '');
+  const variantName = '(flipped|flip|reversed|reverse|mirrored|mirror)';
+  const prefixVariant = new RegExp(`(?<![a-z0-9])${variantName}[_.\\\\s·-]*extra(?:[_.\\\\s·-]+([a-z0-9]+)|(${compactIndex}))(?![a-z0-9])`, 'gi');
+  const middleVariant = new RegExp(`(?<![a-z0-9])extra[_.\\\\s·-]*${variantName}(?:[_.\\\\s·-]+([a-z0-9]+)|(${compactIndex}))(?![a-z0-9])`, 'gi');
+  const suffixVariant = [
+    new RegExp(`(?<![a-z0-9])extra[_.\\\\s·-]+([a-z0-9]+?)[_.\\\\s·-]*${variantName}(?![a-z0-9])`, 'gi'),
+    new RegExp(`(?<![a-z0-9])extra(${compactIndex})${variantName}(?![a-z0-9])`, 'gi'),
+  ];
+  const standardExtra = [
+    /(?<![a-z0-9])extra[_.\s·-]+([a-z0-9]+)(?![a-z0-9])/gi,
+    new RegExp(`(?<![a-z0-9])extra(${compactIndex})(?![a-z0-9])`, 'gi'),
+  ];
+  for (const match of name.matchAll(prefixVariant)) addExtra(match[2] || match[3], match[1]);
+  for (const match of name.matchAll(middleVariant)) addExtra(match[2] || match[3], match[1]);
+  for (const pattern of suffixVariant) {
+    for (const match of name.matchAll(pattern)) addExtra(match[1], match[2]);
+  }
+  for (const pattern of standardExtra) {
+    for (const match of name.matchAll(pattern)) addExtra(match[1]);
   }
 
   const inlinePattern = /(?:^|[_ .-])(modkit|mod|tuning)[_ .:-]*([a-z0-9]+)/i;

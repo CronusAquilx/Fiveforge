@@ -130,17 +130,32 @@ EXTRA_INDEX_WORDS = {
     "nineteen": "19",
     "twenty": "20",
 }
+EXTRA_COMPACT_INDEX_PATTERN = "|".join(
+    [r"\d+", *EXTRA_INDEX_WORDS.keys()]
+)
 EXTRA_NAME_PATTERNS = (
     re.compile(
-        r"(?<![a-z0-9])(?P<variant>flipped|flip|reversed|reverse|mirrored|mirror)[_.\s-]*extra[_.\s-]*(?P<index>[a-z0-9]+)(?![a-z0-9])",
+        rf"(?<![a-z0-9])(?P<variant>flipped|flip|reversed|reverse|mirrored|mirror)[_.\s-]*extra(?:[_.\s-]+(?P<index>[a-z0-9]+)|(?P<compact_index>{EXTRA_COMPACT_INDEX_PATTERN}))(?![a-z0-9])",
         re.IGNORECASE,
     ),
     re.compile(
-        r"(?<![a-z0-9])extra[_.\s-]*(?P<variant>flipped|flip|reversed|reverse|mirrored|mirror)[_.\s-]*(?P<index>[a-z0-9]+)(?![a-z0-9])",
+        rf"(?<![a-z0-9])extra[_.\s-]*(?P<variant>flipped|flip|reversed|reverse|mirrored|mirror)(?:[_.\s-]+(?P<index>[a-z0-9]+)|(?P<compact_index>{EXTRA_COMPACT_INDEX_PATTERN}))(?![a-z0-9])",
         re.IGNORECASE,
     ),
     re.compile(
-        r"(?<![a-z0-9])extra[_.\s-]*(?P<index>[a-z0-9]+)(?:[_.\s-]*(?P<variant>flipped|flip|reversed|reverse|mirrored|mirror))?(?![a-z0-9])",
+        r"(?<![a-z0-9])extra[_.\s-]+(?P<index>[a-z0-9]+?)[_.\s-]*(?P<variant>flipped|flip|reversed|reverse|mirrored|mirror)(?![a-z0-9])",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"(?<![a-z0-9])extra(?P<compact_index>{EXTRA_COMPACT_INDEX_PATTERN})(?P<variant>flipped|flip|reversed|reverse|mirrored|mirror)(?![a-z0-9])",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?<![a-z0-9])extra[_.\s-]+(?P<index>[a-z0-9]+)(?![a-z0-9])",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"(?<![a-z0-9])extra(?P<compact_index>{EXTRA_COMPACT_INDEX_PATTERN})(?![a-z0-9])",
         re.IGNORECASE,
     ),
 )
@@ -151,9 +166,12 @@ def extra_part_from_name(name: str) -> dict[str, str] | None:
         match = pattern.search(name.strip())
         if not match:
             continue
-        raw_index = match.group("index").casefold()
+        groups = match.groupdict()
+        raw_index = (groups.get("index") or groups.get("compact_index") or "").casefold()
         index = EXTRA_INDEX_WORDS.get(raw_index, raw_index)
-        variant = EXTRA_VARIANTS.get((match.groupdict().get("variant") or "").casefold(), "")
+        if index.isdigit():
+            index = str(int(index))
+        variant = EXTRA_VARIANTS.get((groups.get("variant") or "").casefold(), "")
         id = f"extra:{index}:{variant or 'normal'}"
         label = f"Extra {index}"
         if variant:
@@ -172,11 +190,30 @@ def extra_sort_key(part: dict[str, str]) -> tuple[int, int | str, str]:
 def vehicle_extra_parts(drawables: list[Any]) -> list[dict[str, str]]:
     parts: dict[str, dict[str, str]] = {}
     for item in drawables:
-        skeleton = getattr(item.drawable, "skeleton", None)
-        if skeleton is None:
-            continue
-        for bone in skeleton.bones:
-            part = extra_part_from_name(str(getattr(bone, "name", "") or ""))
+        drawable = getattr(item, "drawable", None)
+        names = [
+            str(getattr(item, "name", "") or ""),
+            str(getattr(drawable, "name", "") or ""),
+        ]
+        skeleton = getattr(drawable, "skeleton", None)
+        if skeleton is not None:
+            names.extend(str(getattr(bone, "name", "") or "") for bone in skeleton.bones)
+
+        # Some resources label extras on drawable or mesh names instead of bones.
+        # Walk every drawable model/LOD so inspection is not limited to the LOD
+        # selected for the viewport preview.
+        if drawable is not None:
+            try:
+                for model in drawable.iter_models():
+                    names.extend(
+                        str(getattr(mesh, "name", "") or "")
+                        for mesh in getattr(model, "meshes", []) or []
+                    )
+            except (AttributeError, TypeError, ValueError):
+                pass
+
+        for name in names:
+            part = extra_part_from_name(name)
             if part:
                 parts.setdefault(part["id"], part)
     return sorted(parts.values(), key=extra_sort_key)
