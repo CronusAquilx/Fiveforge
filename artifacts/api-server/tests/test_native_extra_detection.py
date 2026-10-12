@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from native_assets import extra_part_from_name, vehicle_extra_parts
+from native_assets import diffuse_texture_slot, extra_part_from_name, material_color, vehicle_extra_parts
 
 
 class NativeExtraDetectionTests(unittest.TestCase):
@@ -43,6 +43,31 @@ class NativeExtraDetectionTests(unittest.TestCase):
             {part["id"] for part in results},
             {"extra:1:normal", "extra:2:flipped", "extra:3:reversed"},
         )
+
+    def test_vehicle_paint_uses_the_second_diffuse_sampler_as_its_color_layer(self):
+        slots = {
+            "DiffuseSampler": "vehicle_generic_smallspecmap",
+            "DiffuseSampler2": "jesko_sign_4",
+        }
+        self.assertEqual(diffuse_texture_slot("vehicle_paint3", slots), "DiffuseSampler2")
+        self.assertEqual(material_color(None, "vehicle_paint3"), [1.0, 1.0, 1.0])
+
+    def test_vehicle_paint_uses_a_matched_sampler_before_an_unmatched_one(self):
+        slots = {
+            "DiffuseSampler2": "missing_livery",
+            "DiffuseSampler": "body_color",
+        }
+        self.assertEqual(
+            diffuse_texture_slot("vehicle_paint3", slots, lambda name: name == "body_color"),
+            "DiffuseSampler",
+        )
+
+    def test_other_shaders_keep_the_standard_base_color_sampler_order(self):
+        slots = {
+            "DiffuseSampler": "generic",
+            "BaseColorSampler": "painted_body",
+        }
+        self.assertEqual(diffuse_texture_slot("vehicle_mesh", slots), "BaseColorSampler")
 
 
 if __name__ == "__main__":

@@ -4,8 +4,8 @@ import {
   Activity, ArrowDownToLine, Axis3D, Box, Check, ChevronDown, ChevronRight, CircleHelp,
   Copy, Download, Eye, EyeOff, FilePlus2, FolderOpen, Grid2X2, HardDrive,
   ImagePlus, Layers3, LockKeyhole, Menu, Move3D, PanelLeftClose, PanelRightClose,
-  Plus, RotateCcw, RotateCw, Save, Search, Settings2, ShieldCheck, Trash2, Upload,
-  X, ZoomIn,
+  MoreHorizontal, Paintbrush, Plus, RotateCcw, RotateCw, Save, Search, Settings2,
+  ShieldCheck, Trash2, Upload, X, ZoomIn,
 } from 'lucide-react';
 import { Viewport } from '@/components/Viewport';
 import ResourcePackageDialog from '@/components/ResourcePackageDialog';
@@ -24,15 +24,128 @@ import {
   type NativeYftExtra,
   type NativeYftMeshEdit,
   type NativeYftMeshMap,
+  type NativeYftPreview,
 } from '@/lib/native-yft-preview';
 
 type Notice = { kind: 'success' | 'error' | 'info'; message: string } | null;
 type Busy = { label: string; progress: number } | null;
+type SurfaceFinish = 'bodyPaint' | 'colour' | 'chrome' | 'matte' | 'emissive' | 'original';
 type VehicleAddonPart = VehiclePartControl & { file: File };
 type VehicleExtraSource = NativeYftExtra & { sources: string[] };
 type InlineVehiclePart = Pick<VehiclePartControl, 'id' | 'label'> & { category: 'extra' | 'inline' };
 const supported = '.glb,.gltf,.obj,.stl,.mtl,.png,.jpg,.jpeg,.webp,.yft,.ytd,.ydr,.ydd,.ybn,.ytyp,.ymap,.ymf,.ycd,.ymt,.yld,.ypt,.meta,.lua,.zip';
 const unsupportedGame = ['YFT', 'YTD', 'YDR', 'YDD', 'YBN', 'YTYP', 'YMAP'];
+const originalMaterialMaps = new WeakMap<THREE.Material, THREE.Texture | null>();
+
+function captureSurfaceBaseline(material: THREE.MeshStandardMaterial) {
+  if (material.userData.forgeSurfaceBaseline) return;
+  originalMaterialMaps.set(material, material.map?.clone() || null);
+  material.userData.forgeSurfaceBaseline = {
+    color: `#${material.color.getHexString()}`,
+    roughness: material.roughness,
+    metalness: material.metalness,
+    emissive: `#${material.emissive.getHexString()}`,
+    emissiveIntensity: material.emissiveIntensity,
+  };
+}
+
+function textureWithPaintColor(source: THREE.Texture, color: string): THREE.CanvasTexture | null {
+  const image = source.image as CanvasImageSource | null;
+  const dimensions = source.image as { width?: number; height?: number; videoWidth?: number; videoHeight?: number } | null;
+  const width = dimensions?.width || dimensions?.videoWidth || 0;
+  const height = dimensions?.height || dimensions?.videoHeight || 0;
+  if (!image || !width || !height || width * height > 16_000_000) return null;
+
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    if (!context) return null;
+    context.drawImage(image, 0, 0, width, height);
+    const pixels = context.getImageData(0, 0, width, height).data;
+    let hasTransparentPixels = false;
+    for (let index = 3; index < pixels.length; index += 4) {
+      if (pixels[index] < 255) {
+        hasTransparentPixels = true;
+        break;
+      }
+    }
+    if (!hasTransparentPixels) return null;
+
+    context.globalCompositeOperation = 'destination-over';
+    context.fillStyle = color;
+    context.fillRect(0, 0, width, height);
+    const composite = new THREE.CanvasTexture(canvas);
+    composite.name = source.name;
+    composite.colorSpace = source.colorSpace;
+    composite.mapping = source.mapping;
+    composite.wrapS = source.wrapS;
+    composite.wrapT = source.wrapT;
+    composite.magFilter = source.magFilter;
+    composite.minFilter = source.minFilter;
+    composite.anisotropy = source.anisotropy;
+    composite.repeat.copy(source.repeat);
+    composite.offset.copy(source.offset);
+    composite.center.copy(source.center);
+    composite.rotation = source.rotation;
+    composite.flipY = source.flipY;
+    composite.needsUpdate = true;
+    return composite;
+  } catch {
+    return null;
+  }
+}
+
+function applyPaintPreviewColor(material: THREE.MeshStandardMaterial, color: string) {
+  const sourceMap = originalMaterialMaps.get(material) || null;
+  const composite = sourceMap ? textureWithPaintColor(sourceMap, color) : null;
+  if (material.userData.forgePaintPreviewMap) material.map?.dispose();
+  if (composite) {
+    material.map = composite;
+    material.color.set('#ffffff');
+    material.userData.forgePaintPreviewMap = true;
+  } else {
+    material.map = sourceMap?.clone() || null;
+    material.color.set(color);
+    material.userData.forgePaintPreviewMap = false;
+  }
+  material.userData.forgePaintColor = color;
+  material.needsUpdate = true;
+}
+
+function restoreSourceMaterialMap(material: THREE.MeshStandardMaterial) {
+  if (!material.userData.forgePaintPreviewMap) return;
+  material.map?.dispose();
+  material.map = originalMaterialMaps.get(material)?.clone() || null;
+  material.userData.forgePaintPreviewMap = false;
+  material.needsUpdate = true;
+}
+
+function initializeNativeMaterialPreview(root: THREE.Object3D) {
+  root.traverse((node) => {
+    const mesh = node as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    materials.forEach((material) => {
+      if (!('roughness' in material) || !('metalness' in material) || !('emissive' in material)) return;
+      const standard = material as THREE.MeshStandardMaterial;
+      captureSurfaceBaseline(standard);
+      const shader = gtaMaterialMetadata(standard.name || '')?.shader?.toLowerCase() || '';
+      if (!shader.includes('vehicle_paint') && !shader.includes('vehiclepaint')) {
+        standard.userData.forgeFinish = 'original';
+        return;
+      }
+      standard.userData.forgeFinish = 'bodyPaint';
+      applyPaintPreviewColor(standard, '#000000');
+      standard.roughness = 0.2;
+      standard.metalness = 0.58;
+      standard.emissive.set('#000000');
+      standard.emissiveIntensity = 1;
+      standard.needsUpdate = true;
+    });
+  });
+}
 
 function normalizeYftStem(path: string) {
   return (path.split('/').pop() || path).replace(/\.yft$/i, '').replace(/_(?:hi|med|low|vlow)$/i, '').toLocaleLowerCase();
@@ -283,6 +396,8 @@ function cloneScene(source: THREE.Group) {
     const cloneMaterial = (material: THREE.Material) => {
       const cloned = material.clone() as THREE.MeshStandardMaterial;
       if (cloned.map) cloned.map = cloned.map.clone();
+      const originalMap = originalMaterialMaps.get(material);
+      if (originalMaterialMaps.has(material)) originalMaterialMaps.set(cloned, originalMap?.clone() || null);
       return cloned;
     };
     mesh.material = Array.isArray(mesh.material) ? mesh.material.map(cloneMaterial) : cloneMaterial(mesh.material);
@@ -321,6 +436,7 @@ function App() {
   const [sceneQuery, setSceneQuery] = useState('');
   const [showInspector, setShowInspector] = useState(() => window.innerWidth >= 768);
   const [panelTab, setPanelTab] = useState<'object' | 'material'>('object');
+  const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [projectOpen, setProjectOpen] = useState(false);
   const [resourceOpen, setResourceOpen] = useState(false);
@@ -396,6 +512,11 @@ function App() {
   const standard = material as THREE.MeshStandardMaterial | null;
   const gtaMaterial = material ? gtaMaterialMetadata(material.name || '') : null;
   const supportsPbr = !!material && 'roughness' in material && 'metalness' in material;
+  const materialFinish = (standard?.userData.forgeFinish as SurfaceFinish | undefined)
+    || (gtaMaterial?.shader?.toLowerCase().includes('paint') ? 'bodyPaint' : 'original');
+  const materialColor = standard
+    ? String(standard.userData.forgePaintColor || `#${standard.color.getHexString()}`)
+    : '#000000';
   const textureRef = useRef<THREE.Texture | null>(null);
   const baseTexture = standard?.map || textureRef.current;
   const displayedAddonParts = vehicleAddonParts.map((part) => {
@@ -492,6 +613,7 @@ function App() {
         nativeRoot.userData.forgeNativeYftSourcePath = nativeYft.sourcePath;
         nativeRoot.userData.forgeNativeYftLod = nativeYft.lod;
         nativeRoot.userData.forgeNativeYftMeshMap = nativeYft.meshMap;
+        initializeNativeMaterialPreview(nativeRoot);
       }
        const nextPartStates: Record<string, boolean> = mode === 'replace' || !root ? {} : { ...vehicleInlinePartEnabled };
        loadedAssets.forEach(({ root: assetRoot }) => {
@@ -724,7 +846,7 @@ function App() {
          : '';
       setNotice({
          kind: preview.textureCount && !inspectionErrors.length ? 'success' : 'info',
-          message: `Loaded ${preview.meshCount} usable YFT meshes; ${textureStatus}.${extraSummary}${skippedMeshes}${unmatched}${omitted}${textureErrors}${shaderSummary}${inspectionSummary} Resource ZIP export can rebuild whole-mesh transforms and hide/delete edits as native YFT across safely matched LOD files. Partial face-group edits and viewport material changes are refused; existing collision and physics are preserved.`,
+          message: `Loaded ${preview.meshCount} usable YFT meshes; ${textureStatus}.${extraSummary}${skippedMeshes}${unmatched}${omitted}${textureErrors}${shaderSummary}${inspectionSummary} Resource ZIP export can rebuild whole-mesh transforms and hide/delete edits as native YFT across safely matched LOD files. Partial face-group edits and preview-only material changes block native YFT export; existing collision and physics are preserved.`,
       });
     } catch (error) {
       setBusy(null);
@@ -780,11 +902,68 @@ function App() {
   const updateMaterial = (key: 'color' | 'roughness' | 'metalness', value: string | number) => {
     if (!standard) return;
     if (selected?.userData.forgeLocked) { setNotice({ kind: 'info', message: 'Unlock this object in the scene tree before editing it.' }); return; }
+    captureSurfaceBaseline(standard);
     snapshot();
     markNativeYftUnsupported(root, selected, 'material edits');
-    if (key === 'color') standard.color.set(value as string);
-    else standard[key] = Number(value);
+    if (key === 'color') {
+      const shader = gtaMaterial?.shader?.toLowerCase() || '';
+      const isVehiclePaint = shader.includes('vehicle_paint') || shader.includes('vehiclepaint');
+      const currentFinish = standard.userData.forgeFinish as SurfaceFinish | undefined;
+      const nextFinish = currentFinish === 'original' || !currentFinish
+        ? (isVehiclePaint ? 'bodyPaint' : 'colour')
+        : currentFinish;
+      standard.userData.forgeFinish = nextFinish;
+      standard.userData.forgePaintColor = value as string;
+      if (isVehiclePaint || nextFinish === 'bodyPaint') applyPaintPreviewColor(standard, value as string);
+      else {
+        restoreSourceMaterialMap(standard);
+        standard.color.set(value as string);
+      }
+    } else standard[key] = Number(value);
     standard.needsUpdate = true; setSceneRevision((v) => v + 1); setDirty(true);
+  };
+  const setMaterialFinish = (finish: SurfaceFinish) => {
+    if (!standard) return;
+    if (selected?.userData.forgeLocked) { setNotice({ kind: 'info', message: 'Unlock this object in the scene tree before editing it.' }); return; }
+    captureSurfaceBaseline(standard);
+    const baseline = standard.userData.forgeSurfaceBaseline as {
+      color: string; roughness: number; metalness: number; emissive: string; emissiveIntensity: number;
+    };
+    const isVehiclePaint = Boolean(gtaMaterial?.shader?.toLowerCase().includes('paint'));
+    const color = String(standard.userData.forgePaintColor || (isVehiclePaint ? '#000000' : `#${standard.color.getHexString()}`));
+    snapshot();
+    if (finish !== 'original') markNativeYftUnsupported(root, selected, 'material finish and color edits');
+
+    standard.userData.forgeFinish = finish;
+    if (finish === 'original') {
+      restoreSourceMaterialMap(standard);
+      const sourceMap = originalMaterialMaps.get(standard);
+      if (standard.map && sourceMap) standard.map = sourceMap.clone();
+      else standard.map = sourceMap || null;
+      standard.color.set(baseline.color);
+      standard.roughness = baseline.roughness;
+      standard.metalness = baseline.metalness;
+      standard.emissive.set(baseline.emissive);
+      standard.emissiveIntensity = baseline.emissiveIntensity;
+      standard.userData.forgePaintColor = baseline.color;
+    } else {
+      if (isVehiclePaint || finish === 'bodyPaint') applyPaintPreviewColor(standard, color);
+      else {
+        restoreSourceMaterialMap(standard);
+        standard.color.set(color);
+      }
+      if (finish === 'bodyPaint') { standard.roughness = 0.2; standard.metalness = 0.58; }
+      if (finish === 'colour') { standard.roughness = 0.42; standard.metalness = 0.08; }
+      if (finish === 'chrome') { standard.roughness = 0.06; standard.metalness = 1; }
+      if (finish === 'matte') { standard.roughness = 0.88; standard.metalness = 0; }
+      if (finish === 'emissive') { standard.roughness = 0.35; standard.metalness = 0.02; }
+      standard.emissive.set(finish === 'emissive' ? color : '#000000');
+      standard.emissiveIntensity = finish === 'emissive' ? 1.4 : 1;
+      standard.userData.forgePaintColor = color;
+    }
+    standard.needsUpdate = true;
+    setSceneRevision((value) => value + 1);
+    setDirty(true);
   };
   const saveLocal = async (asNew = false) => {
     if (!root) { setNotice({ kind: 'info', message: 'Load a model before saving a project.' }); return; }
@@ -950,14 +1129,33 @@ function App() {
       setBusy(null);
     }
   };
-  const previewNativeModel = async (file: File) => {
+  const previewNativeModel = async (preview: NativeYftPreview, sourcePath: string, textureFiles: File[]) => {
     const preservedSources = resourcePackage?.files.map((item) => item.file) || sourceFiles;
-    const loaded = await walkFiles([file], 'replace', preservedSources.length ? preservedSources : [file], true);
+    const loaded = await walkFiles(
+      [preview.model],
+      'replace',
+      preservedSources.length ? preservedSources : [preview.model],
+      true,
+      { sourcePath, lod: preview.nativeMeshLod, meshMap: preview.nativeMeshMap },
+    );
     if (loaded) {
-      setFormat('YFT model preview');
+      vehicleTextureFiles.current = textureFiles;
+      const sourceLabel = sourcePath.split('/').pop() || sourcePath;
+      setVehicleNativeExtras((current) => {
+        const merged = new Map(current.map((extra) => [extra.id, { ...extra, sources: [...extra.sources] }]));
+        preview.extras.forEach((extra) => {
+          const existing = merged.get(extra.id);
+          merged.set(extra.id, {
+            ...extra,
+            sources: [...new Set([...(existing?.sources || []), sourceLabel])],
+          });
+        });
+        return [...merged.values()].sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true }));
+      });
+      setFormat(`${sourceLabel} · YFT preview`);
       setNotice({
         kind: 'success',
-        message: 'YFT preview loaded. Whole-mesh transforms and hide/delete edits are rebuilt into native YFT files when you export the FiveM resource ZIP. GLB is a separate preview/interchange export.',
+        message: `YFT preview loaded with ${preview.textureCount} matched YTD texture${preview.textureCount === 1 ? '' : 's'}. Whole-mesh transforms and hide/delete edits rebuild into native YFT on resource ZIP export; viewport material changes remain preview-only and block native YFT rebuild.`,
       });
     }
   };
@@ -1192,7 +1390,16 @@ function App() {
                   <p>Viewport material is a PBR approximation; GTA’s game shader is identified here but is not executed in the browser.</p>
                   <a href="https://docs.sollumz.org/2.6/documentation/fragments.yft/vehicle-shaders" target="_blank" rel="noreferrer">GTA vehicle shader and paint reference ↗</a>
                 </div>}
-                <div className="inspector-section"><div className="section-title">SURFACE</div><label className="color-field"><span>Base color</span><div><input type="color" value={`#${standard.color.getHexString()}`} onChange={(e) => updateMaterial('color', e.target.value)} /><code>{standard.color.getHexString().toUpperCase()}</code></div></label>
+                <div className="inspector-section"><div className="section-title">SURFACE</div>
+                  <label className="finish-field"><span>Finish</span><select data-testid="select-material-finish" value={materialFinish} onChange={(event) => setMaterialFinish(event.target.value as SurfaceFinish)}>
+                    <option value="bodyPaint">Body paint · follows shop</option>
+                    <option value="colour">Colour</option>
+                    <option value="chrome">Chrome</option>
+                    <option value="matte">Matte</option>
+                    <option value="emissive">Emissive / LED</option>
+                    <option value="original">Original</option>
+                  </select></label>
+                  <label className="color-field"><span>Colour</span><div><input data-testid="input-material-color" aria-label="Selected material colour" type="color" value={materialColor} onChange={(e) => updateMaterial('color', e.target.value)} /><code>{materialColor.replace('#', '').toUpperCase()}</code></div></label>
                   <RangeField label="Roughness" value={standard.roughness ?? 0.5} onChange={(v) => updateMaterial('roughness', v)} /><RangeField label="Metalness" value={standard.metalness ?? 0} onChange={(v) => updateMaterial('metalness', v)} />
                 </div>
                 <div className="inspector-section texture-section"><div className="section-title">BASE-COLOR TEXTURE</div>
@@ -1206,9 +1413,32 @@ function App() {
             </div>}
         </aside>}
       </div>
+      <div className="mobile-edit-actions" aria-label="Quick edit actions">
+        <button type="button" onClick={undo} disabled={!history.current.length}><RotateCcw size={14} />Undo</button>
+        <button type="button" onClick={redo} disabled={!future.current.length}><RotateCw size={14} />Redo</button>
+        <button type="button" onClick={() => selected && duplicateObject(selected)} disabled={!root || !selected || selected === root}><Copy size={14} />Duplicate</button>
+        <button type="button" onClick={() => selected && toggleVisible(selected)} disabled={!root || !selected || selected === root}>{selected?.visible ? <Eye size={14} /> : <EyeOff size={14} />}{selected?.visible ? 'Hide' : 'Show'}</button>
+        <button type="button" onClick={() => selected && toggleLock(selected)} disabled={!root || !selected}><LockKeyhole size={14} />{selected?.userData.forgeLocked ? 'Unlock' : 'Lock'}</button>
+        <button type="button" className="danger-action" onClick={() => selected && deleteObject(selected)} disabled={!root || !selected || selected === root}><Trash2 size={14} />Delete</button>
+      </div>
+      <nav className="mobile-dock" aria-label="Mobile editor panels">
+        <button type="button" className="mobile-dock-item" onClick={() => { setMobileMoreOpen(false); openImport('append'); }}><Plus /><span>Add</span></button>
+        <button type="button" className={`mobile-dock-item${showInspector && panelTab === 'object' ? ' active' : ''}`} aria-pressed={showInspector && panelTab === 'object'} onClick={() => { setMobileMoreOpen(false); setShowTree(false); setPanelTab('object'); setShowInspector(true); }}><Box /><span>Parts</span></button>
+        <button type="button" className={`mobile-dock-item${showTree ? ' active' : ''}`} aria-pressed={showTree} onClick={() => { setMobileMoreOpen(false); setShowInspector(false); setShowTree((current) => !current); }}><Layers3 /><span>Scene</span></button>
+        <button type="button" className={`mobile-dock-item${showInspector && panelTab === 'material' ? ' active' : ''}`} aria-pressed={showInspector && panelTab === 'material'} onClick={() => { setMobileMoreOpen(false); setShowTree(false); setPanelTab('material'); setShowInspector(true); }}><Paintbrush /><span>Paint</span></button>
+        <button type="button" className="mobile-dock-item" onClick={() => { setMobileMoreOpen(false); setExportOpen(true); }} disabled={!root && !resourcePackage}><ArrowDownToLine /><span>Export</span></button>
+        <button type="button" className={`mobile-dock-item${mobileMoreOpen ? ' active' : ''}`} aria-expanded={mobileMoreOpen} onClick={() => setMobileMoreOpen((current) => !current)}><MoreHorizontal /><span>More</span></button>
+      </nav>
+      {mobileMoreOpen && <div className="mobile-more-menu" role="menu">
+        <button type="button" role="menuitem" onClick={() => { setMobileMoreOpen(false); void saveLocal(); }}><Save size={16} />Save locally</button>
+        <button type="button" role="menuitem" onClick={() => { setMobileMoreOpen(false); void showProjects(); }}><FolderOpen size={16} />Open project</button>
+        <button type="button" role="menuitem" onClick={() => { setMobileMoreOpen(false); setResourceOpen(true); }}><HardDrive size={16} />FiveM resource</button>
+        {resourcePackage && <button type="button" role="menuitem" onClick={() => { setMobileMoreOpen(false); setTextureStudioOpen(true); }}><ImagePlus size={16} />Texture studio</button>}
+        <button type="button" role="menuitem" onClick={() => { setMobileMoreOpen(false); fitView(); }}><ZoomIn size={16} />Fit vehicle</button>
+      </div>}
        <footer className="bottom-note"><span>FORGE STUDIO <i>·</i> BROWSER WORKSHOP</span><span>YFT viewport preview is converted; supported geometry edits rebuild into native YFT on resource ZIP export.</span><span>V 0.2.0</span></footer>
       {notice && <div className={`notice notice-${notice.kind}`} role="status"><span>{notice.kind === 'success' ? <Check size={14} /> : notice.kind === 'error' ? <X size={14} /> : <CircleHelp size={14} />}</span>{notice.message}<button onClick={() => setNotice(null)} aria-label="Dismiss message"><X size={13} /></button></div>}
-       {exportOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) setExportOpen(false); }}><section className="dialog export-dialog" role="dialog" aria-modal="true" aria-labelledby="export-title"><div className="dialog-header"><div><span className="eyebrow">GENERATE FILE</span><h2 id="export-title">Export {root ? 'scene' : 'resource'}</h2></div><IconButton icon={X} label="Close export" onClick={() => setExportOpen(false)} /></div><p className="dialog-intro">Downloads are generated locally and saved directly to your device.</p>{resourcePackage && <button className="export-choice" onClick={() => void exportResource()}><div className="format-chip">ZIP</div><div><b>{resourcePackage.name} · FiveM resource</b><small>{resourcePackage.files.length} source files · supported whole-mesh transforms and hide/delete edits rebuild into native YFT · YTD replacements saved in place{resourcePackage.hasManifest ? ' · original manifest preserved' : ' · fxmanifest.lua added on export'}</small></div><ChevronRight size={15} /></button>}{root && <><label className="form-label">Filename<input value={exportName} onChange={(e) => setExportName(e.target.value)} data-testid="input-export-filename" /></label><div className="export-options">{(['glb', 'gltf', 'obj', 'stl'] as const).map((kind) => <button key={kind} className="export-choice" onClick={() => void exportScene(kind)}><div className="format-chip">{kind.toUpperCase()}</div><div><b>{kind === 'glb' ? 'GLB · Single file' : kind === 'gltf' ? 'GLTF · ZIP package' : kind === 'obj' ? 'OBJ + MTL · ZIP' : 'STL · Geometry only'}</b><small>{kind === 'glb' ? 'Binary scene with embedded materials and textures' : kind === 'gltf' ? 'JSON scene packaged with its resources' : kind === 'obj' ? 'Mesh data and a basic material definition' : 'Warning: materials and textures are not included'}</small></div><ChevronRight size={15} /></button>)}</div><div className="native-warning"><ShieldCheck size={14} /><span>Standard 3D downloads are <b>not native GTA assets.</b> Export a FiveM resource ZIP to rebuild supported whole-mesh transforms and hide/delete edits into YFT; partial face-group and material edits are refused. Original collision and vehicle physics are preserved.</span></div></>}</section></div>}
+       {exportOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) setExportOpen(false); }}><section className="dialog export-dialog" role="dialog" aria-modal="true" aria-labelledby="export-title"><div className="dialog-header"><div><span className="eyebrow">GENERATE FILE</span><h2 id="export-title">Export {root ? 'scene' : 'resource'}</h2></div><IconButton icon={X} label="Close export" onClick={() => setExportOpen(false)} /></div><p className="dialog-intro">Downloads are generated locally and saved directly to your device.</p>{resourcePackage && <button className="export-choice" onClick={() => void exportResource()}><div className="format-chip">ZIP</div><div><b>{resourcePackage.name} · FiveM resource</b><small>{resourcePackage.files.length} source files · supported whole-mesh transforms and hide/delete edits rebuild into native YFT · YTD replacements saved in place{resourcePackage.hasManifest ? ' · original manifest preserved' : ' · fxmanifest.lua added on export'}</small></div><ChevronRight size={15} /></button>}{root && <><label className="form-label">Filename<input value={exportName} onChange={(e) => setExportName(e.target.value)} data-testid="input-export-filename" /></label><div className="export-options">{(['glb', 'gltf', 'obj', 'stl'] as const).map((kind) => <button key={kind} className="export-choice" onClick={() => void exportScene(kind)}><div className="format-chip">{kind.toUpperCase()}</div><div><b>{kind === 'glb' ? 'GLB · Single file' : kind === 'gltf' ? 'GLTF · ZIP package' : kind === 'obj' ? 'OBJ + MTL · ZIP' : 'STL · Geometry only'}</b><small>{kind === 'glb' ? 'Binary scene with embedded materials and textures' : kind === 'gltf' ? 'JSON scene packaged with its resources' : kind === 'obj' ? 'Mesh data and a basic material definition' : 'Warning: materials and textures are not included'}</small></div><ChevronRight size={15} /></button>)}</div><div className="native-warning"><ShieldCheck size={14} /><span>Standard 3D downloads are <b>not native GTA assets.</b> Export a FiveM resource ZIP to rebuild supported whole-mesh transforms and hide/delete edits into YFT. Partial face-group edits and preview-only material or texture changes block native rebuild. Original collision and vehicle physics are preserved.</span></div></>}</section></div>}
       {projectOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) setProjectOpen(false); }}><section className="dialog projects-dialog" role="dialog" aria-modal="true" aria-labelledby="projects-title"><div className="dialog-header"><div><span className="eyebrow">THIS BROWSER ONLY</span><h2 id="projects-title">Local projects</h2></div><IconButton icon={X} label="Close projects" onClick={() => setProjectOpen(false)} /></div><p className="dialog-intro">Project data is stored in this browser's local database. It is never uploaded.</p><div className="project-list scrollbar-thin">{projects.length ? projects.map((project) => <button className="project-row" key={project.id} onClick={() => void openLocal(project.id)}><div className="project-file"><Box size={16} /></div><div><b>{project.name}</b><small>Saved {new Date(project.updatedAt).toLocaleString()} · {project.sources.length} source file{project.sources.length === 1 ? '' : 's'}</small></div><ChevronRight size={14} /></button>) : <div className="project-list-empty"><HardDrive size={19} /><b>No saved projects</b><span>Save a scene locally to find it here.</span></div>}</div><div className="dialog-footer"><button className="secondary-action" onClick={() => { setProjectOpen(false); clearScene(); }}><FilePlus2 size={14} /> New project</button><button className="primary-action" onClick={() => setProjectOpen(false)}>Done</button></div></section></div>}
       <ResourcePackageDialog
         open={resourceOpen}

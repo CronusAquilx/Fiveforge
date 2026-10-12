@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Download, ImagePlus, LoaderCircle, RefreshCw, X } from 'lucide-react';
 import type { ResourcePackage } from '@/lib/resource-package';
-import { previewNativeYft } from '@/lib/native-yft-preview';
+import { previewNativeYft, type NativeYftPreview } from '@/lib/native-yft-preview';
 
 type NativeTexture = {
   name: string;
@@ -17,7 +17,7 @@ type Props = {
   resource: ResourcePackage;
   onClose: () => void;
   onReplace: (path: string, file: File) => void;
-  onPreviewModel: (file: File) => Promise<void>;
+  onPreviewModel: (preview: NativeYftPreview, sourcePath: string, textureFiles: File[]) => Promise<void>;
 };
 
 const MAX_NATIVE_UPLOAD = 250 * 1024 * 1024;
@@ -158,7 +158,7 @@ export default function NativeTextureStudioDialog({ resource, onClose, onReplace
         totalBytes += item.file.size;
       }
       const preview = await previewNativeYft(selectedYft.file, previewYtds);
-      await onPreviewModel(preview.model);
+      await onPreviewModel(preview, selectedYft.path, previewYtds);
       const textureStatus = preview.textureCount
         ? `${preview.textureCount} YTD textures matched`
         : previewYtds.length
@@ -248,7 +248,7 @@ export default function NativeTextureStudioDialog({ resource, onClose, onReplace
           {!loadingTextures && ytdFiles.length === 0 && (
             <div className="nt-empty">No YTD texture dictionary is included in this resource. Add its matching YTD to preview or replace vehicle textures.</div>
           )}
-          {yftFiles.length > 0 && <p className="nt-note">YFT preview loads into the regular editor. Resource export can rebuild whole-mesh transforms and hide/delete edits as native YFT; partial face-group edits and viewport material changes are refused. Replacing a texture rebuilds the selected YTD in this resource. Collision and vehicle physics are preserved unchanged.</p>}
+          {yftFiles.length > 0 && <p className="nt-note">YFT preview loads into the regular editor with matched YTD textures. Resource export can rebuild whole-mesh transforms and hide/delete edits as native YFT; partial face-group edits and preview-only material or finish changes block native YFT rebuild. Replacing a texture rebuilds the selected YTD in this resource. Collision and vehicle physics are preserved unchanged.</p>}
           <p className="nt-note">Native files are sent to this app’s parser in memory for preview or rebuilding, then discarded. They are not saved by the API.</p>
           {error && <div className="nt-message error" role="alert">{error}</div>}
           {success && <div className="nt-message success" role="status">{success}</div>}

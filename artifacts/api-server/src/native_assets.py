@@ -320,15 +320,41 @@ def mesh_texture_slots(material: Any) -> dict[str, str]:
     return slots
 
 
+def diffuse_texture_slot(
+    shader_name: str,
+    texture_slots: dict[str, str],
+    texture_exists: Any = None,
+) -> str | None:
+    shader = shader_name.casefold()
+    if "vehicle_paint" in shader or "vehiclepaint" in shader:
+        candidates = ("DiffuseSampler2", "BaseColorSampler", "AlbedoSampler", "DiffuseSampler")
+    else:
+        candidates = ("BaseColorSampler", "AlbedoSampler", "DiffuseSampler", "DiffuseSampler2")
+    available = [slot for slot in candidates if texture_slots.get(slot)]
+    if texture_exists:
+        return next(
+            (slot for slot in available if texture_exists(texture_slots[slot])),
+            available[0] if available else None,
+        )
+    return available[0] if available else None
+
+
 def mesh_texture_name(material: Any) -> str:
     slots = mesh_texture_slots(material)
-    for slot in ("DiffuseSampler", "BaseColorSampler", "AlbedoSampler", "DiffuseSampler2"):
-        if slots.get(slot):
-            return slots[slot]
+    shader_name = str(
+        getattr(material, "shader_name", None)
+        or getattr(material, "resolved_shader_file_name", None)
+        or ""
+    )
+    slot = diffuse_texture_slot(shader_name, slots)
+    if slot:
+        return slots[slot]
     return next(iter(slots.values()), "")
 
 
 def material_color(material: Any, shader_name: str) -> list[float]:
+    if "vehicle_paint" in shader_name.casefold() or "vehiclepaint" in shader_name.casefold():
+        return [1.0, 1.0, 1.0]
     if material is not None:
         for name in ("matDiffuseColor", "matDiffuseColor2", "diffuseColor", "MaterialColor"):
             try:
@@ -797,11 +823,13 @@ def preview_yft(payload: dict[str, Any]) -> dict[str, Any]:
             mesh.vertex_normals = normals[:, (0, 2, 1)] * np.asarray([1.0, 1.0, -1.0], dtype=np.float32)
 
         source_material = source.material
-        texture_slots = mesh_texture_slots(source_material)
-        diffuse_slot = next(
-            (slot for slot in ("DiffuseSampler", "BaseColorSampler", "AlbedoSampler", "DiffuseSampler2") if texture_slots.get(slot)),
-            None,
+        shader_name = str(
+            getattr(source_material, "shader_name", None)
+            or getattr(source_material, "resolved_shader_file_name", None)
+            or ""
         )
+        texture_slots = mesh_texture_slots(source_material)
+        diffuse_slot = diffuse_texture_slot(shader_name, texture_slots, find_texture)
         normal_slot = next(
             (slot for slot in ("BumpSampler", "NormalSampler") if texture_slots.get(slot)),
             None,
@@ -832,11 +860,6 @@ def preview_yft(payload: dict[str, Any]) -> dict[str, Any]:
         else:
             normal_image = None
 
-        shader_name = str(
-            getattr(source_material, "shader_name", None)
-            or getattr(source_material, "resolved_shader_file_name", None)
-            or ""
-        )
         color = material_color(source_material, shader_name)
         roughness, metallic = material_pbr_factors(shader_name, source_material)
         material = trimesh.visual.material.PBRMaterial(
