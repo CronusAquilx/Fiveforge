@@ -40,13 +40,76 @@ def display_mesh_name(source_name: str, material_name: str, index: int, duplicat
     if not name or generic.fullmatch(name) or name.casefold() in {"default", "material", "none"}:
         name = f"Vehicle part {index + 1:02d}"
     else:
-        name = re.sub(r"[_-]+", " ", name).strip()
-        name = re.sub(r"\s+", " ", name)
-        if name.islower():
-            name = name.title()
+        key = re.sub(r"[^a-z0-9]", "", name.casefold())
+        engine = re.fullmatch(r"eng(?:ine)?([1-9])", key)
+        wheel = re.fullmatch(r"wheel(?:mesh)?(lf|rf|lr|rr)(?:l([12])|ng)?", key)
+        hub = re.fullmatch(r"hub(lf|rf|lr|rr)", key)
+        door = re.fullmatch(r"door(dside|pside)(f|r)", key)
+        if key == "bodyshell":
+            name = "Body Shell"
+        elif key == "steeringwheel":
+            name = "Steering Wheel"
+        elif engine:
+            name = f"Engine {engine.group(1)}"
+        elif wheel:
+            suffix = f" L{wheel.group(2)}" if wheel.group(2) else (" NG" if key.endswith("ng") else "")
+            name = f"Wheel {wheel.group(1).upper()}{suffix}"
+        elif hub:
+            name = f"Hub {hub.group(1).upper()}"
+        elif door:
+            side = "Driver" if door.group(1) == "dside" else "Passenger"
+            position = "Front" if door.group(2) == "f" else "Rear"
+            name = f"{side} Door {position}"
+        else:
+            parts = re.sub(r"[_-]+", " ", name).strip().split()
+            abbreviations = {"lf": "LF", "rf": "RF", "lr": "LR", "rr": "RR"}
+            name = " ".join(abbreviations.get(part.casefold(), part.capitalize()) for part in parts)
     duplicates[name.casefold()] = duplicates.get(name.casefold(), 0) + 1
     count = duplicates[name.casefold()]
     return f"{name} · {count}" if count > 1 else name
+
+
+def dominant_bone_name(mesh: Any, skeleton: Any) -> str:
+    if skeleton is None or not mesh.bone_ids or not mesh.blend_indices or not mesh.blend_weights:
+        return ""
+    import numpy as np
+
+    if len(mesh.blend_indices) != len(mesh.blend_weights):
+        return ""
+    try:
+        indices = np.asarray(mesh.blend_indices, dtype=np.int32)
+        weights = np.asarray(mesh.blend_weights, dtype=np.float32)
+        if indices.shape != weights.shape or indices.ndim != 2:
+            return ""
+        valid = (indices >= 0) & (indices < len(mesh.bone_ids)) & (weights > 0)
+        totals = np.bincount(indices[valid], weights=weights[valid], minlength=len(mesh.bone_ids))
+        if not totals.size or float(totals.max()) <= 0:
+            return ""
+        bone_index = mesh.bone_ids[int(totals.argmax())]
+        bones_by_index = {item.index: item for item in skeleton.bones}
+        bone = bones_by_index.get(bone_index)
+        if bone and bone.name.casefold() in {"lf", "rf", "lr", "rr"}:
+            parent = bones_by_index.get(bone.parent_index)
+            if parent and parent.name.casefold().startswith("wheel_"):
+                bone = parent
+        return str(bone.name).strip() if bone else ""
+    except (TypeError, ValueError, OverflowError):
+        return ""
+
+
+def mesh_texture_name(material: Any) -> str:
+    if material is None:
+        return ""
+    for slot in ("DiffuseSampler", "DiffuseSampler2", "BaseColorSampler", "AlbedoSampler"):
+        try:
+            reference = material.get_texture(slot)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            reference = None
+        name = texture_reference_name(reference)
+        if name:
+            return name
+    textures = getattr(material, "textures", None) or []
+    return texture_reference_name(textures[0]) if textures else ""
 
 
 def decode_base64(value: Any, label: str) -> bytes:
@@ -178,32 +241,6 @@ def preview_yft(payload: dict[str, Any]) -> dict[str, Any]:
     import numpy as np
     import trimesh
 
-    texture_images: dict[str, Image.Image] = {}
-    texture_names: dict[str, str] = {}
-    total_pixels = 0
-    for dictionary in dictionaries:
-        if not isinstance(dictionary, dict):
-            continue
-        raw = decode_base64(dictionary.get("dataBase64"), "YTD file")
-        ytd = read_ytd(raw)
-        for texture in ytd.textures:
-            total_pixels += max(texture.width, 0) * max(texture.height, 0)
-            if total_pixels > MAX_PREVIEW_PIXELS:
-                break
-            try:
-                image = image_from_texture(texture)
-                exact_key = texture.name.strip().casefold()
-                canonical_key = texture_key(texture.name)
-                texture_images[exact_key] = image
-                texture_names[exact_key] = texture.name
-                if canonical_key:
-                    texture_images[canonical_key] = image
-                    texture_names[canonical_key] = texture.name
-            except Exception:
-                continue
-        if total_pixels > MAX_PREVIEW_PIXELS:
-            break
-
     asset = Yft.from_bytes(model_data, path=str(payload.get("fileName") or "vehicle.yft"))
     try:
         meshes = asset.meshes(lod="high")
@@ -216,13 +253,60 @@ def preview_yft(payload: dict[str, Any]) -> dict[str, Any]:
     if len(meshes) > 600:
         raise ValueError("This YFT contains too many meshes to preview safely.")
 
+    drawable = next(asset.iter_drawables(), None)
+    skeleton = drawable.drawable.skeleton if drawable else None
+    texture_references = {
+        texture_key(mesh_texture_name(source.material))
+        for source in meshes
+        if mesh_texture_name(source.material)
+    }
+
+    texture_images: dict[str, Image.Image] = {}
+    texture_candidates: dict[str, Texture] = {}
+    for dictionary in dictionaries:
+        if not isinstance(dictionary, dict):
+            continue
+        raw = decode_base64(dictionary.get("dataBase64"), "YTD file")
+        ytd = read_ytd(raw)
+        for texture in ytd.textures:
+            key = texture_key(texture.name)
+            if key:
+                texture_candidates[key] = texture
+
+    selected_keys = texture_references.intersection(texture_candidates)
+    for reference_key in texture_references.difference(selected_keys):
+        matches = [
+            key
+            for key in texture_candidates
+            if len(key) >= 4 and (key.endswith(reference_key) or reference_key.endswith(key))
+        ]
+        if len(matches) == 1:
+            selected_keys.add(matches[0])
+
+    total_pixels = 0
+    for key in selected_keys:
+        texture = texture_candidates[key]
+        total_pixels += max(texture.width, 0) * max(texture.height, 0)
+        if total_pixels > MAX_PREVIEW_PIXELS:
+            break
+        try:
+            image = image_from_texture(texture)
+            texture_images[key] = image
+            texture_images[texture.name.strip().casefold()] = image
+        except Exception:
+            continue
+
     scene = trimesh.Scene()
     used_textures: set[str] = set()
     unmatched_textures: set[str] = set()
     skipped = 0
     mesh_names: dict[str, int] = {}
     for index, source in enumerate(meshes):
-        positions = vector_rows(source.positions)
+        positions = np.fromiter(
+            (float(component) for point in source.positions for component in (point.x, point.y, point.z)),
+            dtype=np.float32,
+            count=len(source.positions) * 3,
+        ).reshape((-1, 3))
         indices = [int(value) for value in source.indices]
         if len(positions) < 3 or len(indices) < 3:
             skipped += 1
@@ -233,29 +317,21 @@ def preview_yft(payload: dict[str, Any]) -> dict[str, Any]:
             continue
 
         mesh = trimesh.Trimesh(
-            vertices=np.asarray([row[:3] for row in positions], dtype=np.float32),
+            vertices=positions[:, (0, 2, 1)] * np.asarray([1.0, 1.0, -1.0], dtype=np.float32),
             faces=np.asarray(indices, dtype=np.uint32).reshape((-1, 3)),
             process=False,
         )
-        normals = vector_rows(source.normals)
-        if len(normals) == len(positions):
-            mesh.vertex_normals = np.asarray([row[:3] for row in normals], dtype=np.float32)
+        if len(source.normals) == len(positions):
+            normals = np.fromiter(
+                (float(component) for point in source.normals for component in (point.x, point.y, point.z)),
+                dtype=np.float32,
+                count=len(source.normals) * 3,
+            ).reshape((-1, 3))
+            mesh.vertex_normals = normals[:, (0, 2, 1)] * np.asarray([1.0, 1.0, -1.0], dtype=np.float32)
 
         source_material = source.material
         material_name = str(getattr(source_material, "name", "") or "")
-        texture_name = None
-        if source_material is not None:
-            for slot in ("DiffuseSampler", "DiffuseSampler2", "BaseColorSampler", "AlbedoSampler"):
-                try:
-                    reference = source_material.get_texture(slot)
-                except (AttributeError, KeyError, TypeError, ValueError):
-                    reference = None
-                reference_name = texture_reference_name(reference)
-                if reference_name:
-                    texture_name = reference_name
-                    break
-            if not texture_name and source_material.textures:
-                texture_name = texture_reference_name(source_material.textures[0])
+        texture_name = mesh_texture_name(source_material) or None
         image = None
         if texture_name:
             leaf_name = texture_name.replace("\\", "/").rsplit("/", 1)[-1].strip()
@@ -273,7 +349,11 @@ def preview_yft(payload: dict[str, Any]) -> dict[str, Any]:
                 unmatched_textures.add(leaf_name)
         uv_channels = source.texcoords or []
         if uv_channels and len(uv_channels[0]) == len(positions) and image is not None:
-            uv = np.asarray([[float(point.x), float(point.y)] for point in uv_channels[0]], dtype=np.float32)
+            uv = np.fromiter(
+                (float(component) for point in uv_channels[0] for component in (point.x, point.y)),
+                dtype=np.float32,
+                count=len(uv_channels[0]) * 2,
+            ).reshape((-1, 2))
             material = trimesh.visual.material.PBRMaterial(
                 name=material_name,
                 baseColorTexture=image,
@@ -287,7 +367,12 @@ def preview_yft(payload: dict[str, Any]) -> dict[str, Any]:
                 vertex_colors=np.tile(np.array([164, 164, 160, 255], dtype=np.uint8), (len(positions), 1)),
             )
 
-        name = display_mesh_name(str(getattr(source, "name", "") or ""), material_name, index, mesh_names)
+        name = display_mesh_name(
+            str(getattr(source, "name", "") or "") or dominant_bone_name(source, skeleton),
+            material_name,
+            index,
+            mesh_names,
+        )
         scene.add_geometry(mesh, geom_name=name, node_name=name)
 
     if not scene.geometry:

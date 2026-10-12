@@ -302,13 +302,16 @@ function App() {
         : selectedYtds.length
           ? 'no YTD textures matched the model material references'
           : 'no matching YTD was available for preview';
+      const skippedMeshes = preview.skippedMeshCount
+        ? ` ${preview.skippedMeshCount} mesh entries without usable triangles were skipped.`
+        : '';
       const unmatched = preview.unmatchedTextures.length
         ? ` Unmatched texture names: ${preview.unmatchedTextures.slice(0, 3).join(', ')}${preview.unmatchedTextures.length > 3 ? '…' : ''}.`
         : '';
       const omitted = selectedYtds.length < ytdFiles.length ? ' Some YTDs were skipped to stay within preview limits.' : '';
       setNotice({
         kind: preview.textureCount ? 'success' : 'info',
-        message: `Loaded ${preview.meshCount} YFT meshes; ${textureStatus}.${unmatched}${omitted} Export a source-preserving resource ZIP for the original YFT and YTD files. Viewport geometry edits export as GLB, not native YFT.`,
+        message: `Loaded ${preview.meshCount} usable YFT meshes; ${textureStatus}.${skippedMeshes}${unmatched}${omitted} Export a source-preserving resource ZIP for the original YFT and YTD files. Viewport geometry edits export as GLB, not native YFT.`,
       });
     } catch (error) {
       setBusy(null);
