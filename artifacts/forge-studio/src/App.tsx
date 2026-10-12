@@ -17,11 +17,13 @@ import './viewport-tools.css';
 import { downloadBlob, expandArchives, exportModel, loadAsset, MAX_FILE_SIZE, validateFiles } from '@/lib/model-io';
 import { getProject, listProjects, saveProject, type LocalProject } from '@/lib/projects';
 import { buildFiveMResourceZip, readResourcePackage, type ResourcePackage, type ResourcePackageFile } from '@/lib/resource-package';
-import { previewNativeYft } from '@/lib/native-yft-preview';
+import { inspectNativeYftExtras, previewNativeYft, type NativeYftExtra } from '@/lib/native-yft-preview';
 
 type Notice = { kind: 'success' | 'error' | 'info'; message: string } | null;
 type Busy = { label: string; progress: number } | null;
 type VehicleAddonPart = VehiclePartControl & { file: File };
+type VehicleExtraSource = NativeYftExtra & { sources: string[] };
+type InlineVehiclePart = Pick<VehiclePartControl, 'id' | 'label'> & { category: 'extra' | 'inline' };
 const supported = '.glb,.gltf,.obj,.stl,.mtl,.png,.jpg,.jpeg,.webp,.yft,.ytd,.ydr,.ydd,.ybn,.ytyp,.ymap,.ymf,.ycd,.ymt,.yld,.ypt,.meta,.lua,.zip';
 const unsupportedGame = ['YFT', 'YTD', 'YDR', 'YDD', 'YBN', 'YTYP', 'YMAP'];
 
@@ -79,14 +81,52 @@ function describeVehiclePart(path: string, identifiers: string[]) {
   return label.replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function inlineVehiclePart(name: string) {
-  const match = name.match(/(?:^|[_ .-])(extra|modkit|mod|tuning)[_ .:-]*([a-z0-9]+)/i);
-  if (!match) return null;
-  const prefix = match[1].toLowerCase();
-  const value = match[2].toLowerCase();
-  const category = prefix === 'extra' ? 'Extra' : prefix === 'tuning' || prefix === 'modkit' ? 'Tuning' : 'Mod';
-  const labelValue = value.replace(/([a-z])(\d)/g, '$1 $2').replace(/[_-]+/g, ' ');
-  return { id: `${prefix}:${value}`, label: `${category} ${labelValue.replace(/\b\w/g, (letter) => letter.toUpperCase())}` };
+function inlineVehicleParts(name: string): InlineVehiclePart[] {
+  const parts = new Map<string, InlineVehiclePart>();
+  const indexWords: Record<string, string> = {
+    zero: '0', one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7',
+    eight: '8', nine: '9', ten: '10', eleven: '11', twelve: '12', thirteen: '13', fourteen: '14',
+    fifteen: '15', sixteen: '16', seventeen: '17', eighteen: '18', nineteen: '19', twenty: '20',
+  };
+  const addExtra = (value: string, rawVariant = '') => {
+    const variant = ({ flip: 'flipped', flipped: 'flipped', reverse: 'reversed', reversed: 'reversed', mirror: 'mirrored', mirrored: 'mirrored' } as Record<string, string>)[rawVariant.toLowerCase()] || '';
+    const rawValue = value.toLowerCase();
+    const normalizedValue = indexWords[rawValue] || rawValue;
+    const labelValue = normalizedValue.replace(/([a-z])(\d)/g, '$1 $2').replace(/[_-]+/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+    const id = `extra:${normalizedValue}:${variant || 'normal'}`;
+    parts.set(id, { id, label: `Extra ${labelValue}${variant ? ` · ${variant[0].toUpperCase()}${variant.slice(1)}` : ''}`, category: 'extra' });
+  };
+  const prefixVariant = /(?<![a-z0-9])(flipped|flip|reversed|reverse|mirrored|mirror)[_.\s·-]*extra[_.\s·-]*([a-z0-9]+)(?![a-z0-9])/gi;
+  const suffixVariant = /(?<![a-z0-9])extra[_.\s·-]*([a-z0-9]+)(?:[_.\s·-]*(flipped|flip|reversed|reverse|mirrored|mirror))?(?![a-z0-9])/gi;
+  const middleVariant = /(?<![a-z0-9])extra[_.\s·-]*(flipped|flip|reversed|reverse|mirrored|mirror)[_.\s·-]*([a-z0-9]+)(?![a-z0-9])/gi;
+  const variantWords = new Set(['flipped', 'flip', 'reversed', 'reverse', 'mirrored', 'mirror']);
+  for (const match of name.matchAll(prefixVariant)) addExtra(match[2], match[1]);
+  for (const match of name.matchAll(middleVariant)) addExtra(match[2], match[1]);
+  for (const match of name.matchAll(suffixVariant)) {
+    if (!variantWords.has(match[1].toLowerCase())) addExtra(match[1], match[2] || '');
+  }
+
+  const inlinePattern = /(?:^|[_ .-])(modkit|mod|tuning)[_ .:-]*([a-z0-9]+)/i;
+  const match = name.match(inlinePattern);
+  if (match) {
+    const prefix = match[1].toLowerCase();
+    const value = match[2].toLowerCase();
+    const category = prefix === 'tuning' || prefix === 'modkit' ? 'Tuning' : 'Mod';
+    const labelValue = value.replace(/([a-z])(\d)/g, '$1 $2').replace(/[_-]+/g, ' ');
+    const id = `${prefix}:${value}`;
+    parts.set(id, { id, label: `${category} ${labelValue.replace(/\b\w/g, (letter) => letter.toUpperCase())}`, category: 'inline' });
+  }
+  return [...parts.values()];
+}
+
+function vehiclePartsForNode(node: THREE.Object3D): InlineVehiclePart[] {
+  const parts = new Map<string, InlineVehiclePart>();
+  let current: THREE.Object3D | null = node;
+  while (current) {
+    inlineVehicleParts(current.name).forEach((part) => parts.set(part.id, part));
+    current = current.parent;
+  }
+  return [...parts.values()];
 }
 
 function gtaMaterialMetadata(name: string) {
@@ -185,6 +225,9 @@ function App() {
   const [textureStudioOpen, setTextureStudioOpen] = useState(false);
   const [resourcePackage, setResourcePackage] = useState<ResourcePackage | null>(null);
   const [vehicleAddonParts, setVehicleAddonParts] = useState<VehicleAddonPart[]>([]);
+  const [vehicleNativeExtras, setVehicleNativeExtras] = useState<VehicleExtraSource[]>([]);
+  const [vehicleInlinePartEnabled, setVehicleInlinePartEnabled] = useState<Record<string, boolean>>({});
+  const [vehicleSpawnModelNames, setVehicleSpawnModelNames] = useState<string[]>([]);
   const [projects, setProjects] = useState<LocalProject[]>([]);
   const [exportName, setExportName] = useState('vehicle_asset');
   const [textureShown, setTextureShown] = useState(true);
@@ -216,19 +259,36 @@ function App() {
   const stats = useMemo(() => meshStats(root), [root, sourceFiles.length, sceneRevision]);
   const inlineParts = useMemo(() => {
     if (!root) return [];
-    const groups = new Map<string, { label: string; nodes: THREE.Object3D[] }>();
+    const groups = new Map<string, { label: string; category: 'extra' | 'inline'; nodes: THREE.Object3D[]; sources?: string[] }>();
     root.traverse((node) => {
       if (!(node as THREE.Mesh).isMesh) return;
-      const part = inlineVehiclePart(node.name);
-      if (!part) return;
-      const group = groups.get(part.id) || { label: part.label, nodes: [] };
-      group.nodes.push(node);
-      groups.set(part.id, group);
+      const mesh = node as THREE.Mesh;
+      const parts = Array.isArray(mesh.userData.forgeVehicleParts)
+        ? mesh.userData.forgeVehicleParts as InlineVehiclePart[]
+        : vehiclePartsForNode(mesh);
+      mesh.userData.forgeVehicleParts = parts;
+      parts.forEach((part) => {
+        const group = groups.get(part.id) || { label: part.label, category: part.category, nodes: [] };
+        group.nodes.push(mesh);
+        groups.set(part.id, group);
+      });
+    });
+    vehicleNativeExtras.forEach((extra) => {
+      const group = groups.get(extra.id);
+      if (group) group.sources = extra.sources;
+      else groups.set(extra.id, { label: extra.label, category: 'extra', nodes: [], sources: extra.sources });
     });
     return [...groups.entries()]
-      .map(([id, group]) => ({ id, label: group.label, enabled: group.nodes.some((node) => node.visible) }))
+      .map(([id, group]) => ({
+        id,
+        label: group.label,
+        category: group.category,
+        enabled: vehicleInlinePartEnabled[id] ?? (group.category === 'extra' ? false : group.nodes.some((node) => node.visible)),
+        disabled: group.nodes.length === 0,
+        source: group.nodes.length === 0 && group.sources?.length ? `Found in ${group.sources.join(', ')}; not in the current preview` : undefined,
+      }))
       .sort((a, b) => a.label.localeCompare(b.label));
-  }, [root, sceneRevision]);
+  }, [root, sceneRevision, vehicleNativeExtras, vehicleInlinePartEnabled]);
   const activeMesh = meshFrom(selected);
   const material = activeMesh ? (Array.isArray(activeMesh.material) ? activeMesh.material[0] : activeMesh.material) : null;
   const standard = material as THREE.MeshStandardMaterial | null;
@@ -238,7 +298,7 @@ function App() {
   const baseTexture = standard?.map || textureRef.current;
   const displayedAddonParts = vehicleAddonParts.map((part) => {
     const group = root?.children.find((child) => child.userData.forgeVehiclePartId === part.id);
-    return { ...part, enabled: group ? group.visible : Boolean(part.loading && part.enabled) };
+    return { ...part, category: 'addon' as const, enabled: group ? group.visible : Boolean(part.loading && part.enabled) };
   });
 
   useEffect(() => {
@@ -310,15 +370,33 @@ function App() {
       const loadedAssets = await Promise.all(modelFiles.map((file) => loadAsset([file, ...importFiles.filter((sidecar) => sidecar !== file)])));
       window.clearInterval(progressTimer);
       setBusy({ label: 'Preparing scene', progress: 92 });
+       const nextPartStates: Record<string, boolean> = mode === 'replace' || !root ? {} : { ...vehicleInlinePartEnabled };
+       loadedAssets.forEach(({ root: assetRoot }) => {
+         assetRoot.traverse((node) => {
+           const mesh = node as THREE.Mesh;
+           if (!mesh.isMesh) return;
+           const parts = vehiclePartsForNode(mesh);
+           mesh.userData.forgeVehicleParts = parts;
+           parts.forEach((part) => {
+             if (nextPartStates[part.id] === undefined) nextPartStates[part.id] = part.category === 'extra' ? false : mesh.visible;
+           });
+           const extras = parts.filter((part) => part.category === 'extra');
+           if (extras.length) mesh.visible = extras.some((part) => nextPartStates[part.id]);
+           else if (parts.length) mesh.visible = parts.some((part) => nextPartStates[part.id]);
+         });
+       });
       const scene = mode === 'replace' || !root ? new THREE.Group() : root;
       if (mode === 'replace' || !root) { scene.clear(); hiddenTextures.current.clear(); }
       loadedAssets.forEach((loaded) => scene.add(loaded.root));
+       setVehicleInlinePartEnabled(nextPartStates);
       const firstAsset = loadedAssets[0];
       scene.name = mode === 'replace' || !root ? firstAsset.name : scene.name;
       if (mode === 'replace' && !preserveResource) {
         setResourcePackage(null);
         setResourceOpen(false);
         setVehicleAddonParts([]);
+         setVehicleNativeExtras([]);
+         setVehicleSpawnModelNames([]);
         vehicleTextureFiles.current = [];
       }
       setRoot(scene); setSceneRevision((v) => v + 1); setSelection(meshFrom(firstAsset.root) || firstAsset.root); setFormat(loadedAssets.map((item) => item.format).join(' + '));
@@ -398,11 +476,30 @@ function App() {
       const modelCandidates = [...new Map([modelEntry, ...modelPair].filter((item): item is ResourcePackageFile => Boolean(item)).map((item) => [item.path.toLowerCase(), item])).values()];
       if (!modelCandidates.length) modelCandidates.push({ path: modelFile.name, file: modelFile, kind: 'native' });
 
+       const inspectedCandidates = await Promise.all(modelCandidates.map(async (candidate) => {
+         try {
+           return { candidate, extras: await inspectNativeYftExtras(candidate.file), error: undefined };
+         } catch (error) {
+           return { candidate, extras: [] as NativeYftExtra[], error: error instanceof Error ? error.message : 'Could not inspect this YFT.' };
+         }
+       }));
+       const inspectionErrors = inspectedCandidates.filter((item) => item.error).map((item) => `${item.candidate.path}: ${item.error}`);
+       const extrasById = new Map<string, { extra: NativeYftExtra; sources: Set<string> }>();
+       inspectedCandidates.forEach(({ candidate, extras }) => extras.forEach((extra) => {
+         const entry = extrasById.get(extra.id) || { extra, sources: new Set<string>() };
+         entry.sources.add(candidate.path.split('/').pop() || candidate.path);
+         extrasById.set(extra.id, entry);
+       }));
+       const previewCandidates = [...inspectedCandidates].sort((a, b) =>
+         b.extras.length - a.extras.length ||
+         Number(isHighLodYft(b.candidate.path)) - Number(isHighLodYft(a.candidate.path)) ||
+         b.candidate.file.size - a.candidate.file.size,
+       );
       let preview: Awaited<ReturnType<typeof previewNativeYft>> | null = null;
       let selectedModel = modelFile;
       let selectedYtds: File[] = [];
       let lastPreviewError: unknown;
-      for (const candidate of modelCandidates) {
+       for (const { candidate } of previewCandidates) {
         const stem = normalizeYftStem(candidate.path);
         const prioritizedYtds = [
           ...ytdFiles.filter((item) => normalizeYftStem(item.path.replace(/\.ytd$/i, '.yft')) === stem),
@@ -425,6 +522,15 @@ function App() {
         }
       }
       if (!preview) throw lastPreviewError instanceof Error ? lastPreviewError : new Error('No compatible YFT LOD could be previewed.');
+       preview.extras.forEach((extra) => {
+         const entry = extrasById.get(extra.id) || { extra, sources: new Set<string>() };
+         entry.sources.add(selectedModel.name);
+         extrasById.set(extra.id, entry);
+       });
+       const availableExtraIds = new Set(preview.meshExtras);
+       const allNativeExtras: VehicleExtraSource[] = [...extrasById.values()]
+         .map(({ extra, sources }) => ({ ...extra, sources: [...sources] }))
+         .sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true }));
 
       vehicleTextureFiles.current = selectedYtds;
       const addonFiles = yftFiles.filter((item) => {
@@ -447,6 +553,13 @@ function App() {
       const loaded = await walkFiles([preview.model, ...otherModels, ...importedCompanions], mode, originalFiles, true);
       if (!loaded) return;
       setVehicleAddonParts(nextAddonParts);
+       setVehicleNativeExtras(allNativeExtras);
+       const selectedStem = normalizeYftStem(selectedModel.name);
+       setVehicleSpawnModelNames([
+         vehicleIdentifiers.modelNames.find((name) => name.toLowerCase() === selectedStem) ||
+         vehicleIdentifiers.modelNames[0] ||
+         selectedStem,
+       ]);
       const modelLabel = vehicleIdentifiers.modelNames.find((name) => name === normalizeYftStem(selectedModel.name)) || selectedModel.name.replace(/\.yft$/i, '');
       if (mode === 'replace') setProjectName(modelLabel);
       setFormat(`${selectedModel.name} · YFT preview`);
@@ -464,9 +577,14 @@ function App() {
       const omitted = selectedYtds.length < ytdFiles.length ? ' Some YTDs were skipped to stay within preview limits.' : '';
       const textureErrors = preview.textureErrors.length ? ` ${preview.textureErrors.length} unreadable YTD${preview.textureErrors.length === 1 ? ' was' : 's were'} skipped; the car model still loaded.` : '';
       const shaderSummary = preview.gtaShaders.length ? ` GTA shaders: ${preview.gtaShaders.slice(0, 3).join(', ')}${preview.gtaShaders.length > 3 ? '…' : ''}.` : '';
+       const unpreviewedExtras = allNativeExtras.filter((extra) => !availableExtraIds.has(extra.id)).length;
+       const extraSummary = ` ${allNativeExtras.length} extra${allNativeExtras.length === 1 ? '' : 's'} checked across ${modelCandidates.length} matching YFT file${modelCandidates.length === 1 ? '' : 's'}; extras start hidden in the preview.${unpreviewedExtras ? ` ${unpreviewedExtras} listed extra${unpreviewedExtras === 1 ? ' has' : 's have'} no geometry in the selected LOD.` : ''}`;
+       const inspectionSummary = inspectionErrors.length
+         ? ` Extra scanning was incomplete: ${inspectionErrors.slice(0, 2).join('; ')}${inspectionErrors.length > 2 ? '…' : ''}.`
+         : '';
       setNotice({
-        kind: preview.textureCount ? 'success' : 'info',
-        message: `Loaded ${preview.meshCount} usable YFT meshes; ${textureStatus}.${skippedMeshes}${unmatched}${omitted}${textureErrors}${shaderSummary} Export a source-preserving resource ZIP for the original YFT and YTD files. Viewport geometry edits export as GLB, not native YFT.`,
+         kind: preview.textureCount && !inspectionErrors.length ? 'success' : 'info',
+         message: `Loaded ${preview.meshCount} usable YFT meshes; ${textureStatus}.${extraSummary}${skippedMeshes}${unmatched}${omitted}${textureErrors}${shaderSummary}${inspectionSummary} Export a source-preserving resource ZIP for the original YFT and YTD files. Viewport geometry edits export as GLB, not native YFT.`,
       });
     } catch (error) {
       setBusy(null);
@@ -609,6 +727,9 @@ function App() {
       } else {
         vehicleTextureFiles.current = [];
         setVehicleAddonParts([]);
+        setVehicleNativeExtras([]);
+        setVehicleInlinePartEnabled({});
+        setVehicleSpawnModelNames([]);
         setResourceOpen(true);
         const nativeCount = resource.files.filter((file) => file.kind === 'native').length;
         setNotice({
@@ -629,11 +750,20 @@ function App() {
     const safeName = resourcePackage.name.trim().replace(/[^\w.-]+/g, '_') || 'fivem_resource';
     setBusy({ label: 'Building FiveM resource ZIP', progress: 20 });
     try {
-      const blob = await buildFiveMResourceZip(resourcePackage);
+      const extraIds = [...new Set(vehicleNativeExtras
+        .map((extra) => Number(extra.id.split(':')[1]))
+        .filter((id) => Number.isInteger(id) && id >= 0 && id <= 255))];
+      const spawnDefaults = vehicleSpawnModelNames.length && extraIds.length
+        ? { modelNames: vehicleSpawnModelNames, extraIds }
+        : undefined;
+      const blob = await buildFiveMResourceZip(resourcePackage, spawnDefaults);
       downloadBlob(blob, `${safeName}.zip`);
       setResourceOpen(false);
       setExportOpen(false);
-      setNotice({ kind: 'success', message: `${safeName}.zip downloaded as a FiveM resource package.` });
+      setNotice({
+        kind: 'success',
+        message: `${safeName}.zip downloaded as a FiveM resource package.${spawnDefaults ? ` A generated client script disables extras ${extraIds.join(', ')} by default for ${vehicleSpawnModelNames.join(', ')} vehicles.` : ''}`,
+      });
     } catch (error) {
       setNotice({ kind: 'error', message: `Resource export failed: ${error instanceof Error ? error.message : 'unknown error'}` });
     } finally {
@@ -659,14 +789,35 @@ function App() {
   const toggleVisible = (item: THREE.Object3D) => { snapshot(); item.visible = !item.visible; setSceneRevision((v) => v + 1); setDirty(true); };
   const toggleInlineVehiclePart = (id: string) => {
     if (!root) return;
-    const matches: THREE.Object3D[] = [];
+    const matches: THREE.Mesh[] = [];
     root.traverse((node) => {
-      if ((node as THREE.Mesh).isMesh && inlineVehiclePart(node.name)?.id === id) matches.push(node);
+      const mesh = node as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      const parts = Array.isArray(mesh.userData.forgeVehicleParts)
+        ? mesh.userData.forgeVehicleParts as InlineVehiclePart[]
+        : vehiclePartsForNode(mesh);
+      mesh.userData.forgeVehicleParts = parts;
+      if (parts.some((part) => part.id === id)) matches.push(mesh);
     });
     if (!matches.length) return;
     snapshot();
-    const shouldShow = matches.every((node) => !node.visible);
-    matches.forEach((node) => { node.visible = shouldShow; });
+    const currentlyEnabled = vehicleInlinePartEnabled[id] ?? matches.some((node) => node.visible);
+    const nextPartStates = { ...vehicleInlinePartEnabled, [id]: !currentlyEnabled };
+    const isExtra = id.startsWith('extra:');
+    if (isExtra) {
+      root.traverse((node) => {
+        const mesh = node as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        const parts = Array.isArray(mesh.userData.forgeVehicleParts)
+          ? mesh.userData.forgeVehicleParts as InlineVehiclePart[]
+          : vehiclePartsForNode(mesh);
+        const extraIds = parts.filter((part) => part.category === 'extra').map((part) => part.id);
+        if (extraIds.length) mesh.visible = extraIds.some((partId) => nextPartStates[partId] ?? false);
+      });
+    } else {
+      matches.forEach((node) => { node.visible = !currentlyEnabled; });
+    }
+    setVehicleInlinePartEnabled(nextPartStates);
     setSceneRevision((value) => value + 1);
     setDirty(true);
   };
@@ -710,7 +861,7 @@ function App() {
   const clearScene = () => {
     if (dirty && !window.confirm('Discard unsaved changes and create a new project?')) return;
     setRoot(null); setSourceFiles([]); setSelectedId(null); setFormat('—'); setProjectName('Untitled project'); setHasSavedProject(false);
-    setResourcePackage(null); setResourceOpen(false); setTextureStudioOpen(false); setVehicleAddonParts([]); vehicleTextureFiles.current = [];
+    setResourcePackage(null); setResourceOpen(false); setTextureStudioOpen(false); setVehicleAddonParts([]); setVehicleNativeExtras([]); setVehicleInlinePartEnabled({}); setVehicleSpawnModelNames([]); vehicleTextureFiles.current = [];
     setProjectId(crypto.randomUUID()); setDirty(false); history.current = []; future.current = []; hiddenTextures.current.clear(); textureRef.current = null; setTextureShown(true);
   };
   const openImport = (mode: 'append' | 'replace') => {

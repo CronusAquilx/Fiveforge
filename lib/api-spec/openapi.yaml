@@ -79,6 +79,29 @@ paths:
           description: Invalid request
         "422":
           description: Unsupported or invalid GTA asset
+  /native-assets/inspect-yft-extras-binary:
+    post:
+      operationId: inspectYftExtrasBinary
+      tags: [native-assets]
+      summary: List vehicle extras defined by a YFT skeleton
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Vehicle extras found in the YFT skeleton
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/YftExtras"
+        "400":
+          description: Invalid request
+        "422":
+          description: Unsupported or invalid GTA asset
   /healthz:
     get:
       operationId: healthCheck
@@ -180,7 +203,7 @@ components:
             $ref: "#/components/schemas/YftTextureDictionary"
     YftPreview:
       type: object
-      required: [fileName, modelBase64, meshCount, skippedMeshCount, textureCount, usedTextures]
+      required: [fileName, modelBase64, meshCount, skippedMeshCount, textureCount, usedTextures, extras, meshExtras]
       properties:
         fileName:
           type: string
@@ -197,6 +220,32 @@ components:
           type: array
           items:
             type: string
+        extras:
+          type: array
+          items:
+            $ref: "#/components/schemas/VehicleExtra"
+        meshExtras:
+          type: array
+          items:
+            type: string
+    VehicleExtra:
+      type: object
+      required: [id, label]
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+    YftExtras:
+      type: object
+      required: [fileName, extras]
+      properties:
+        fileName:
+          type: string
+        extras:
+          type: array
+          items:
+            $ref: "#/components/schemas/VehicleExtra"
     HealthStatus:
       type: object
       properties:

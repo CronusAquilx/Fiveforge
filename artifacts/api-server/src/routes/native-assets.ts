@@ -133,6 +133,57 @@ function runBinaryProcessor(operation: string, payload: Buffer): Promise<{ metad
   });
 }
 
+function runBinaryJsonProcessor(operation: string, payload: Buffer): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("uv", ["run", "--project", workspaceRoot, "python", pythonScript, operation], {
+      cwd: workspaceRoot,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const stdout: Buffer[] = [];
+    let stderr = "";
+    let outputBytes = 0;
+    let settled = false;
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      child.kill();
+      reject(error);
+    };
+    child.stdout.on("data", (chunk: Buffer | string) => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      outputBytes += buffer.length;
+      if (outputBytes > 1024 * 1024) {
+        fail(new Error("The native asset reader returned too much metadata."));
+        return;
+      }
+      stdout.push(buffer);
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      if (stderr.length < 6000) stderr += chunk;
+    });
+    child.on("error", (error) => fail(new Error(`Could not start the native asset reader: ${error.message}`)));
+    child.stdin.on("error", () => undefined);
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      let result: Record<string, unknown>;
+      try {
+        result = JSON.parse(Buffer.concat(stdout).toString("utf8")) as Record<string, unknown>;
+      } catch {
+        reject(new Error(stderr.trim() || "The native asset reader returned an invalid response."));
+        return;
+      }
+      if (code !== 0 || typeof result.error === "string") {
+        reject(new Error(typeof result.error === "string" ? result.error : stderr.trim() || "The native asset could not be read."));
+        return;
+      }
+      resolve(result);
+    });
+    child.stdin.end(payload);
+  });
+}
+
 function sendError(response: Response, error: unknown) {
   const message = error instanceof Error ? error.message : "The native asset could not be processed.";
   response.status(message.includes("larger than") || message.includes("exceed") || message.includes("oversized") ? 413 : 422).json({ error: message });
@@ -180,6 +231,18 @@ router.post("/preview-yft", async (request: Request, response: Response) => {
   }
   try {
     response.json(await runProcessor("preview-yft", body));
+  } catch (error) {
+    sendError(response, error);
+  }
+});
+
+router.post("/inspect-yft-extras-binary", express.raw({ type: "application/octet-stream", limit: "251mb" }), async (request: Request, response: Response): Promise<void> => {
+  if (!Buffer.isBuffer(request.body) || request.body.length < 6) {
+    response.status(400).json({ error: "Choose a valid YFT file smaller than 250 MB." });
+    return;
+  }
+  try {
+    response.json(await runBinaryJsonProcessor("inspect-yft-extras-binary", request.body));
   } catch (error) {
     sendError(response, error);
   }

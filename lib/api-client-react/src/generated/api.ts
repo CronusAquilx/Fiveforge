@@ -21,6 +21,7 @@ import type {
 
 import type {
   HealthStatus,
+  YftExtras,
   YftPreview,
   YftPreviewRequest,
   YtdDecodeRequest,
@@ -318,6 +319,94 @@ export const usePreviewYft = <TError = ErrorType<void>,
         TContext
       > => {
       return useMutation(getPreviewYftMutationOptions(options));
+    }
+
+export const getInspectYftExtrasBinaryUrl = () => {
+
+
+
+
+  return `/api/native-assets/inspect-yft-extras-binary`
+}
+
+/**
+ * @summary List vehicle extras defined by a YFT skeleton
+ */
+export const inspectYftExtrasBinary = async (inspectYftExtrasBinaryBody: Blob, options?: Parameters<typeof customFetch>[1]): Promise<YftExtras> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Symbol.iterator in h) {
+      return Object.fromEntries(
+        Array.from(h as Iterable<Iterable<string>>, (entry) => Array.from(entry) as [string, string]),
+      );
+    }
+    const headers: Record<string, string | readonly string[]> = {};
+    for (const [name, value] of Object.entries<string | readonly string[] | undefined>(h)) {
+      if (value !== undefined) headers[name] = value;
+    }
+    return headers;
+  };
+return customFetch<YftExtras>(getInspectYftExtrasBinaryUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream', ...getHeaders(options?.headers) },
+    body: inspectYftExtrasBinaryBody
+  }
+);}
+
+
+
+
+
+export const getInspectYftExtrasBinaryMutationKey = () => ['inspectYftExtrasBinary'] as const;
+
+export const getInspectYftExtrasBinaryMutationOptions = <TError = ErrorType<void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof inspectYftExtrasBinary>>, TError,InspectYftExtrasBinaryMutationVariables, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof inspectYftExtrasBinary>>, TError,InspectYftExtrasBinaryMutationVariables, TContext> => {
+
+const mutationKey = getInspectYftExtrasBinaryMutationKey();
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof inspectYftExtrasBinary>>, InspectYftExtrasBinaryMutationVariables> = (props) => {
+          const {data} = props ?? {};
+
+          return  inspectYftExtrasBinary(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type InspectYftExtrasBinaryMutationResult = NonNullable<Awaited<ReturnType<typeof inspectYftExtrasBinary>>>
+    export type InspectYftExtrasBinaryMutationBody = BodyType<Blob>
+    export type InspectYftExtrasBinaryMutationError = ErrorType<void>
+    export type InspectYftExtrasBinaryMutationVariables = {data: BodyType<Blob>}
+
+    /**
+ * @summary List vehicle extras defined by a YFT skeleton
+ */
+export const useInspectYftExtrasBinary = <TError = ErrorType<void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof inspectYftExtrasBinary>>, TError,InspectYftExtrasBinaryMutationVariables, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof inspectYftExtrasBinary>>,
+        TError,
+        InspectYftExtrasBinaryMutationVariables,
+        TContext
+      > => {
+      return useMutation(getInspectYftExtrasBinaryMutationOptions(options));
     }
 
 export const getHealthCheckUrl = () => {

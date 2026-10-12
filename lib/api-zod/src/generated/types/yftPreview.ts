@@ -5,6 +5,7 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
+import type { VehicleExtra } from './vehicleExtra';
 
 export interface YftPreview {
   fileName: string;
@@ -14,4 +15,6 @@ export interface YftPreview {
   skippedMeshCount: number;
   textureCount: number;
   usedTextures: string[];
+  extras: VehicleExtra[];
+  meshExtras: string[];
 }

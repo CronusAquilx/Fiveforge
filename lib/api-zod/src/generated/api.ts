@@ -73,7 +73,24 @@ export const PreviewYftResponse = zod.object({
   "meshCount": zod.number().int(),
   "skippedMeshCount": zod.number().int(),
   "textureCount": zod.number().int(),
-  "usedTextures": zod.array(zod.string())
+  "usedTextures": zod.array(zod.string()),
+  "extras": zod.array(zod.object({
+  "id": zod.string(),
+  "label": zod.string()
+})),
+  "meshExtras": zod.array(zod.string())
+})
+
+
+/**
+ * @summary List vehicle extras defined by a YFT skeleton
+ */
+export const InspectYftExtrasBinaryResponse = zod.object({
+  "fileName": zod.string(),
+  "extras": zod.array(zod.object({
+  "id": zod.string(),
+  "label": zod.string()
+}))
 })
 
 

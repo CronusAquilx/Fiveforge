@@ -99,6 +99,168 @@ def dominant_bone_name(mesh: Any, skeleton: Any) -> str:
         return ""
 
 
+EXTRA_VARIANTS = {
+    "flip": "flipped",
+    "flipped": "flipped",
+    "reverse": "reversed",
+    "reversed": "reversed",
+    "mirror": "mirrored",
+    "mirrored": "mirrored",
+}
+EXTRA_INDEX_WORDS = {
+    "zero": "0",
+    "one": "1",
+    "two": "2",
+    "three": "3",
+    "four": "4",
+    "five": "5",
+    "six": "6",
+    "seven": "7",
+    "eight": "8",
+    "nine": "9",
+    "ten": "10",
+    "eleven": "11",
+    "twelve": "12",
+    "thirteen": "13",
+    "fourteen": "14",
+    "fifteen": "15",
+    "sixteen": "16",
+    "seventeen": "17",
+    "eighteen": "18",
+    "nineteen": "19",
+    "twenty": "20",
+}
+EXTRA_NAME_PATTERNS = (
+    re.compile(
+        r"(?<![a-z0-9])(?P<variant>flipped|flip|reversed|reverse|mirrored|mirror)[_.\s-]*extra[_.\s-]*(?P<index>[a-z0-9]+)(?![a-z0-9])",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?<![a-z0-9])extra[_.\s-]*(?P<variant>flipped|flip|reversed|reverse|mirrored|mirror)[_.\s-]*(?P<index>[a-z0-9]+)(?![a-z0-9])",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?<![a-z0-9])extra[_.\s-]*(?P<index>[a-z0-9]+)(?:[_.\s-]*(?P<variant>flipped|flip|reversed|reverse|mirrored|mirror))?(?![a-z0-9])",
+        re.IGNORECASE,
+    ),
+)
+
+
+def extra_part_from_name(name: str) -> dict[str, str] | None:
+    for pattern in EXTRA_NAME_PATTERNS:
+        match = pattern.search(name.strip())
+        if not match:
+            continue
+        raw_index = match.group("index").casefold()
+        index = EXTRA_INDEX_WORDS.get(raw_index, raw_index)
+        variant = EXTRA_VARIANTS.get((match.groupdict().get("variant") or "").casefold(), "")
+        id = f"extra:{index}:{variant or 'normal'}"
+        label = f"Extra {index}"
+        if variant:
+            label += f" · {variant.capitalize()}"
+        return {"id": id, "label": label}
+    return None
+
+
+def extra_sort_key(part: dict[str, str]) -> tuple[int, int | str, str]:
+    index = part["id"].split(":")[1]
+    if index.isdigit():
+        return (0, int(index), part["id"].split(":")[2])
+    return (1, index, part["id"].split(":")[2])
+
+
+def vehicle_extra_parts(drawables: list[Any]) -> list[dict[str, str]]:
+    parts: dict[str, dict[str, str]] = {}
+    for item in drawables:
+        skeleton = getattr(item.drawable, "skeleton", None)
+        if skeleton is None:
+            continue
+        for bone in skeleton.bones:
+            part = extra_part_from_name(str(getattr(bone, "name", "") or ""))
+            if part:
+                parts.setdefault(part["id"], part)
+    return sorted(parts.values(), key=extra_sort_key)
+
+
+def mesh_extra_parts(mesh: Any, skeleton: Any) -> list[dict[str, str]]:
+    if skeleton is None or not mesh.bone_ids or not mesh.blend_indices or not mesh.blend_weights:
+        return []
+    import numpy as np
+
+    try:
+        indices = np.asarray(mesh.blend_indices, dtype=np.int32)
+        weights = np.asarray(mesh.blend_weights, dtype=np.float32)
+        if indices.shape != weights.shape or indices.ndim != 2:
+            return []
+        valid = (indices >= 0) & (indices < len(mesh.bone_ids)) & (weights > 0)
+        used_bones = {
+            mesh.bone_ids[int(index)]
+            for index in np.unique(indices[valid])
+        }
+        bones_by_index = {item.index: item for item in skeleton.bones}
+        parts: dict[str, dict[str, str]] = {}
+        for bone_index in used_bones:
+            bone = bones_by_index.get(bone_index)
+            part = extra_part_from_name(str(getattr(bone, "name", "") or "")) if bone else None
+            if part:
+                parts.setdefault(part["id"], part)
+        return sorted(parts.values(), key=extra_sort_key)
+    except (TypeError, ValueError, OverflowError):
+        return []
+
+
+def mesh_extra_face_groups(mesh: Any, skeleton: Any, faces: Any) -> dict[str | None, Any]:
+    import numpy as np
+
+    face_rows = np.asarray(faces, dtype=np.int64)
+    if face_rows.ndim != 2 or face_rows.shape[1] != 3:
+        return {}
+    if skeleton is None or not mesh.bone_ids or not mesh.blend_indices or not mesh.blend_weights:
+        return {None: np.arange(len(face_rows), dtype=np.int64)}
+    try:
+        indices = np.asarray(mesh.blend_indices, dtype=np.int32)
+        weights = np.asarray(mesh.blend_weights, dtype=np.float32)
+        if indices.shape != weights.shape or indices.ndim != 2 or len(indices) == 0:
+            return {None: np.arange(len(face_rows), dtype=np.int64)}
+        bones_by_index = {item.index: item for item in skeleton.bones}
+        extra_weights: dict[str, tuple[dict[str, str], Any]] = {}
+        for palette_index, bone_index in enumerate(mesh.bone_ids):
+            bone = bones_by_index.get(bone_index)
+            part = extra_part_from_name(str(getattr(bone, "name", "") or "")) if bone else None
+            if not part:
+                continue
+            per_vertex = np.sum(np.where(indices == palette_index, weights, 0.0), axis=1)
+            if part["id"] in extra_weights:
+                previous_part, previous_weights = extra_weights[part["id"]]
+                extra_weights[part["id"]] = (previous_part, previous_weights + per_vertex)
+            else:
+                extra_weights[part["id"]] = (part, per_vertex)
+        if not extra_weights:
+            return {None: np.arange(len(face_rows), dtype=np.int64)}
+
+        total_weights = np.sum(np.maximum(weights, 0.0), axis=1)
+        all_extra_weights = np.sum(np.stack([entry[1] for entry in extra_weights.values()], axis=1), axis=1)
+        base_weights = np.maximum(total_weights - all_extra_weights, 0.0)
+        part_rows = sorted(extra_weights.items(), key=lambda item: extra_sort_key(item[1][0]))
+        per_face_base = np.sum(base_weights[face_rows], axis=1)
+        per_face_extras = np.stack([
+            np.sum(extra_weights[part_id][1][face_rows], axis=1)
+            for part_id, _ in part_rows
+        ], axis=1)
+        winning_extra = np.argmax(per_face_extras, axis=1)
+        winning_score = np.max(per_face_extras, axis=1)
+        winners: list[str | None] = [
+            part_rows[int(index)][0] if score > base else None
+            for index, score, base in zip(winning_extra, winning_score, per_face_base)
+        ]
+        result: dict[str | None, Any] = {}
+        for category in dict.fromkeys(winners):
+            result[category] = np.asarray([index for index, winner in enumerate(winners) if winner == category], dtype=np.int64)
+        return result
+    except (IndexError, TypeError, ValueError, OverflowError):
+        return {None: np.arange(len(face_rows), dtype=np.int64)}
+
+
 def mesh_texture_slots(material: Any) -> dict[str, str]:
     if material is None:
         return {}
@@ -452,6 +614,7 @@ def preview_yft(payload: dict[str, Any]) -> dict[str, Any]:
     material_names: set[str] = set()
     skipped = 0
     mesh_names: dict[str, int] = {}
+    mesh_extra_ids: set[str] = set()
 
     def find_texture(name: str) -> Image.Image | None:
         leaf_name = name.replace("\\", "/").rsplit("/", 1)[-1].strip()
@@ -565,7 +728,37 @@ def preview_yft(payload: dict[str, Any]) -> dict[str, Any]:
             index,
             mesh_names,
         )
-        scene.add_geometry(mesh, geom_name=name, node_name=name)
+        extra_parts = mesh_extra_parts(source, skeleton)
+        part_by_id = {part["id"]: part for part in extra_parts}
+        if source_name:
+            named_extra = extra_part_from_name(source_name)
+            if named_extra:
+                part_by_id.setdefault(named_extra["id"], named_extra)
+        face_groups = mesh_extra_face_groups(source, skeleton, mesh.faces)
+        if not any(part_id is not None for part_id in face_groups) and source_name:
+            named_extra = extra_part_from_name(source_name)
+            if named_extra:
+                part_by_id.setdefault(named_extra["id"], named_extra)
+                face_groups = {named_extra["id"]: np.arange(len(mesh.faces), dtype=np.int64)}
+        base_name = f"Vehicle part {index + 1:02d}" if extra_part_from_name(name) else name
+        nonempty_groups = [(part_id, face_indices) for part_id, face_indices in face_groups.items() if len(face_indices)]
+        for part_id, face_indices in nonempty_groups:
+            if part_id is None and len(nonempty_groups) == 1:
+                part_mesh = mesh
+                part_name = base_name
+            else:
+                part_mesh = mesh.submesh([face_indices], append=True, repair=False)
+                if not isinstance(part_mesh, trimesh.Trimesh):
+                    continue
+                if part_id is None:
+                    part_name = base_name
+                else:
+                    part = part_by_id.get(part_id)
+                    if not part:
+                        continue
+                    mesh_extra_ids.add(part_id)
+                    part_name = f"{name} · {part['label']}"
+            scene.add_geometry(part_mesh, geom_name=part_name, node_name=part_name)
 
     if not scene.geometry:
         raise ValueError("No usable render meshes were found in this YFT.")
@@ -582,19 +775,43 @@ def preview_yft(payload: dict[str, Any]) -> dict[str, Any]:
         "unmatchedTextures": sorted(unmatched_textures),
         "textureErrors": texture_errors,
         "gtaShaders": sorted(material_names),
+        "extras": vehicle_extra_parts(drawables),
+        "meshExtras": sorted(mesh_extra_ids, key=lambda id: extra_sort_key({"id": id, "label": id})),
+    }
+
+
+def inspect_yft_extras(payload: dict[str, Any]) -> dict[str, Any]:
+    data = decode_base64(payload.get("modelBase64"), "YFT file")
+    file_name = str(payload.get("fileName") or "vehicle.yft")
+    asset = Yft.from_bytes(data, path=file_name)
+    return {
+        "fileName": file_name,
+        "extras": vehicle_extra_parts(list(asset.iter_drawables())),
     }
 
 
 def main() -> None:
     operation = sys.argv[1] if len(sys.argv) > 1 else ""
     try:
-        payload = decode_binary_preview_bundle(sys.stdin.buffer.read()) if operation == "preview-yft-binary" else json.load(sys.stdin)
+        payload = decode_binary_preview_bundle(sys.stdin.buffer.read()) if operation in {
+            "preview-yft-binary",
+            "inspect-yft-extras-binary",
+        } else json.load(sys.stdin)
         if not isinstance(payload, dict):
             raise ValueError("Request body must be an object.")
         if operation == "decode-ytd":
             result = decode_ytd(payload)
         elif operation == "replace-ytd":
             result = replace_ytd(payload)
+        elif operation == "inspect-yft-extras":
+            result = inspect_yft_extras(payload)
+        elif operation == "inspect-yft-extras-binary":
+            result = {
+                "fileName": payload["fileName"],
+                "extras": vehicle_extra_parts(
+                    list(Yft.from_bytes(payload["modelData"], path=payload["fileName"]).iter_drawables())
+                ),
+            }
         elif operation in {"preview-yft", "preview-yft-binary"}:
             result = preview_yft(payload)
             glb = result.pop("modelGlb")

@@ -7,6 +7,8 @@
  */
 
 export * from './healthStatus';
+export * from './vehicleExtra';
+export * from './yftExtras';
 export * from './yftPreview';
 export * from './yftPreviewRequest';
 export * from './yftTextureDictionary';

@@ -9,13 +9,27 @@ export type NativeYftPreview = {
   unmatchedTextures: string[];
   textureErrors: string[];
   gtaShaders: string[];
+  extras: NativeYftExtra[];
+  meshExtras: string[];
 };
+
+export type NativeYftExtra = { id: string; label: string };
 
 function fromBase64(value: string) {
   const binary = atob(value);
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
   return bytes;
+}
+
+function binaryBundle(files: Array<{ name: string; role: string; file: File }>) {
+  const header = new TextEncoder().encode(JSON.stringify({
+    fileName: files[0]?.name || 'vehicle.yft',
+    files: files.map(({ name, role, file }) => ({ name, role, size: file.size })),
+  }));
+  const headerLength = new Uint8Array(4);
+  new DataView(headerLength.buffer).setUint32(0, header.byteLength, false);
+  return new Blob([headerLength, header, ...files.map(({ file }) => file)], { type: 'application/octet-stream' });
 }
 
 export async function previewNativeYft(modelFile: File, textureFiles: File[] = []): Promise<NativeYftPreview> {
@@ -27,13 +41,7 @@ export async function previewNativeYft(modelFile: File, textureFiles: File[] = [
     { name: modelFile.name, role: 'model', file: modelFile },
     ...textureFiles.map((file) => ({ name: file.webkitRelativePath || file.name, role: 'texture', file })),
   ];
-  const header = new TextEncoder().encode(JSON.stringify({
-    fileName: modelFile.webkitRelativePath || modelFile.name,
-    files: files.map(({ name, role, file }) => ({ name, role, size: file.size })),
-  }));
-  const headerLength = new Uint8Array(4);
-  new DataView(headerLength.buffer).setUint32(0, header.byteLength, false);
-  const body = new Blob([headerLength, header, ...files.map(({ file }) => file)], { type: 'application/octet-stream' });
+  const body = binaryBundle(files);
 
   const response = await fetch('/api/native-assets/preview-yft-binary', {
     method: 'POST',
@@ -56,12 +64,15 @@ export async function previewNativeYft(modelFile: File, textureFiles: File[] = [
     unmatchedTextures?: string[];
     textureErrors?: string[];
     gtaShaders?: string[];
+    extras?: NativeYftExtra[];
+    meshExtras?: string[];
   };
   try {
     data = JSON.parse(new TextDecoder().decode(fromBase64(metadataHeader))) as typeof data;
   } catch {
     throw new Error('The YFT reader returned invalid preview details.');
   }
+  if (!Array.isArray(data.extras) || !Array.isArray(data.meshExtras)) throw new Error('The YFT reader did not return its extra list.');
   const modelBytes = await response.arrayBuffer();
   if (!modelBytes.byteLength || !data.meshCount) throw new Error('The YFT reader returned an empty model preview.');
 
@@ -75,5 +86,30 @@ export async function previewNativeYft(modelFile: File, textureFiles: File[] = [
     unmatchedTextures: data.unmatchedTextures || [],
     textureErrors: data.textureErrors || [],
     gtaShaders: data.gtaShaders || [],
+    extras: data.extras,
+    meshExtras: data.meshExtras,
   };
+}
+
+export async function inspectNativeYftExtras(modelFile: File): Promise<NativeYftExtra[]> {
+  if (modelFile.size > MAX_FILE_SIZE) throw new Error('The YFT file exceeds the 250 MB inspection limit.');
+  const body = binaryBundle([{
+    name: modelFile.webkitRelativePath || modelFile.name,
+    role: 'model',
+    file: modelFile,
+  }]);
+  const response = await fetch('/api/native-assets/inspect-yft-extras-binary', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body,
+  });
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({})) as { error?: string };
+    throw new Error(errorData.error || `Could not inspect extras in ${modelFile.name}.`);
+  }
+  const data = await response.json() as { extras?: NativeYftExtra[] };
+  if (!Array.isArray(data.extras) || data.extras.some((extra) => !extra || typeof extra.id !== 'string' || typeof extra.label !== 'string')) {
+    throw new Error(`The YFT reader returned an invalid extra list for ${modelFile.name}.`);
+  }
+  return data.extras;
 }

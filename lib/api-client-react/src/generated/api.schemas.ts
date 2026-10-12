@@ -57,6 +57,11 @@ export interface YftPreviewRequest {
   textureDictionaries: YftTextureDictionary[];
 }
 
+export interface VehicleExtra {
+  id: string;
+  label: string;
+}
+
 export interface YftPreview {
   fileName: string;
   /** Base64-encoded textured GLB preview */
@@ -65,6 +70,13 @@ export interface YftPreview {
   skippedMeshCount: number;
   textureCount: number;
   usedTextures: string[];
+  extras: VehicleExtra[];
+  meshExtras: string[];
+}
+
+export interface YftExtras {
+  fileName: string;
+  extras: VehicleExtra[];
 }
 
 export interface HealthStatus {
