@@ -204,7 +204,7 @@ export default function ResourcePackageDialog({
 
               <div className="rp-native-note">
                 <ShieldCheck size={14} />
-                <span><b>Native GTA assets can be preserved and packaged.</b> They are not currently previewed or edited in-browser.</span>
+                <span><b>YFT vehicle previews and YTD texture replacement are available</b> from the texture studio. Other native files stay intact in the exported resource.</span>
               </div>
             </>
           )}

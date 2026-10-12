@@ -9,6 +9,8 @@ import {
 } from 'lucide-react';
 import { Viewport } from '@/components/Viewport';
 import ResourcePackageDialog from '@/components/ResourcePackageDialog';
+import NativeTextureStudioDialog from '@/components/NativeTextureStudioDialog';
+import './native-texture-studio.css';
 import { downloadBlob, expandArchives, exportModel, loadAsset, MAX_FILE_SIZE, validateFiles } from '@/lib/model-io';
 import { getProject, listProjects, saveProject, type LocalProject } from '@/lib/projects';
 import { buildFiveMResourceZip, readResourcePackage, type ResourcePackage } from '@/lib/resource-package';
@@ -94,6 +96,7 @@ function App() {
   const [exportOpen, setExportOpen] = useState(false);
   const [projectOpen, setProjectOpen] = useState(false);
   const [resourceOpen, setResourceOpen] = useState(false);
+  const [textureStudioOpen, setTextureStudioOpen] = useState(false);
   const [resourcePackage, setResourcePackage] = useState<ResourcePackage | null>(null);
   const [projects, setProjects] = useState<LocalProject[]>([]);
   const [exportName, setExportName] = useState('vehicle_asset');
@@ -397,6 +400,19 @@ function App() {
       setBusy(null);
     }
   };
+  const previewNativeModel = async (file: File) => {
+    const loaded = await walkFiles([file], 'replace');
+    if (loaded) {
+      setFormat('YFT model preview');
+      setNotice({ kind: 'success', message: 'YFT model and matching YTD textures are loaded in the 3D viewport.' });
+    }
+  };
+  const replaceNativeFile = (path: string, file: File) => {
+    setResourcePackage((current) => current
+      ? { ...current, files: current.files.map((item) => item.path === path ? { ...item, file } : item) }
+      : current);
+    setDirty(true);
+  };
   const fitView = () => window.dispatchEvent(new CustomEvent('forge-fit-view'));
   const closeResourceDialog = useCallback(() => setResourceOpen(false), []);
   const toggleVisible = (item: THREE.Object3D) => { snapshot(); item.visible = !item.visible; setSceneRevision((v) => v + 1); setDirty(true); };
@@ -411,7 +427,7 @@ function App() {
   const clearScene = () => {
     if (dirty && !window.confirm('Discard unsaved changes and create a new project?')) return;
     setRoot(null); setSourceFiles([]); setSelectedId(null); setFormat('—'); setProjectName('Untitled project'); setHasSavedProject(false);
-    setResourcePackage(null); setResourceOpen(false);
+    setResourcePackage(null); setResourceOpen(false); setTextureStudioOpen(false);
     setProjectId(crypto.randomUUID()); setDirty(false); history.current = []; future.current = []; hiddenTextures.current.clear(); textureRef.current = null; setTextureShown(true);
   };
   const openImport = (mode: 'append' | 'replace') => {
@@ -460,7 +476,7 @@ function App() {
             {!root ? <div className="scene-empty"><div className="empty-glyph"><Box size={18} /></div><b>Scene is empty</b><span>Import a model to begin working.</span><button onClick={() => openImport('append')}><Upload size={13} /> Import model</button></div> :
               <SceneTree root={root} selectedId={selectedId} query={sceneQuery} onSelect={setSelection} onRename={renameObject} onDuplicate={duplicateObject} onDelete={deleteObject} onVisible={toggleVisible} onLock={toggleLock} />}
           </div>
-          <div className="native-note"><span className="native-kicker">FIVEM RESOURCE</span><p>{resourcePackage ? `${resourcePackage.name} · ${resourcePackage.files.length} files` : 'ZIP and folder packaging'}</p><div>{unsupportedGame.map((ext) => <code key={ext}>{ext}</code>)}</div><small>{resourcePackage ? 'Native files are preserved for export; preview and binary editing need a GTA-format tool.' : 'Import a ZIP or folder to preserve native assets and package them for FiveM.'}</small>{resourcePackage && <button className="resource-note-button" onClick={() => setResourceOpen(true)}>Browse resource files</button>}</div>
+          <div className="native-note"><span className="native-kicker">FIVEM RESOURCE</span><p>{resourcePackage ? `${resourcePackage.name} · ${resourcePackage.files.length} files` : 'ZIP and folder packaging'}</p><div>{unsupportedGame.map((ext) => <code key={ext}>{ext}</code>)}</div><small>{resourcePackage ? 'Preview YFT models with matching YTDs and replace decoded YTD textures.' : 'Import a ZIP or folder to preview native vehicle assets and edit texture dictionaries.'}</small>{resourcePackage && <><button className="resource-note-button" onClick={() => setTextureStudioOpen(true)}>Open texture studio</button><button className="resource-note-button" onClick={() => setResourceOpen(true)}>Browse resource files</button></>}</div>
         </aside>}
         <section className="viewport-column">
           <div className="viewport-toolbar">
@@ -531,7 +547,7 @@ function App() {
             </div>}
         </aside>}
       </div>
-      <footer className="bottom-note"><span>FORGE STUDIO <i>·</i> BROWSER WORKSHOP</span><span>FiveM ZIPs preserve native files; GTA binary editing and conversion are not available here.</span><span>V 0.2.0</span></footer>
+      <footer className="bottom-note"><span>FORGE STUDIO <i>·</i> BROWSER WORKSHOP</span><span>YFT preview uses a converted GLB; replaced textures are rebuilt into YTD dictionaries.</span><span>V 0.2.0</span></footer>
       {notice && <div className={`notice notice-${notice.kind}`} role="status"><span>{notice.kind === 'success' ? <Check size={14} /> : notice.kind === 'error' ? <X size={14} /> : <CircleHelp size={14} />}</span>{notice.message}<button onClick={() => setNotice(null)} aria-label="Dismiss message"><X size={13} /></button></div>}
       {exportOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) setExportOpen(false); }}><section className="dialog export-dialog" role="dialog" aria-modal="true" aria-labelledby="export-title"><div className="dialog-header"><div><span className="eyebrow">GENERATE FILE</span><h2 id="export-title">Export {root ? 'scene' : 'resource'}</h2></div><IconButton icon={X} label="Close export" onClick={() => setExportOpen(false)} /></div><p className="dialog-intro">Downloads are generated locally and saved directly to your device.</p>{resourcePackage && <button className="export-choice" onClick={() => void exportResource()}><div className="format-chip">ZIP</div><div><b>{resourcePackage.name} · FiveM resource</b><small>{resourcePackage.files.length} source files · native GTA files kept intact{resourcePackage.hasManifest ? ' · original manifest preserved' : ' · fxmanifest.lua added on export'}</small></div><ChevronRight size={15} /></button>}{root && <><label className="form-label">Filename<input value={exportName} onChange={(e) => setExportName(e.target.value)} data-testid="input-export-filename" /></label><div className="export-options">{(['glb', 'gltf', 'obj', 'stl'] as const).map((kind) => <button key={kind} className="export-choice" onClick={() => void exportScene(kind)}><div className="format-chip">{kind.toUpperCase()}</div><div><b>{kind === 'glb' ? 'GLB · Single file' : kind === 'gltf' ? 'GLTF · ZIP package' : kind === 'obj' ? 'OBJ + MTL · ZIP' : 'STL · Geometry only'}</b><small>{kind === 'glb' ? 'Binary scene with embedded materials and textures' : kind === 'gltf' ? 'JSON scene packaged with its resources' : kind === 'obj' ? 'Mesh data and a basic material definition' : 'Warning: materials and textures are not included'}</small></div><ChevronRight size={15} /></button>)}</div><div className="native-warning"><ShieldCheck size={14} /><span>Standard 3D exports are <b>not native GTA assets.</b> Specialist tools are needed to convert them.</span></div></>}</section></div>}
       {projectOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) setProjectOpen(false); }}><section className="dialog projects-dialog" role="dialog" aria-modal="true" aria-labelledby="projects-title"><div className="dialog-header"><div><span className="eyebrow">THIS BROWSER ONLY</span><h2 id="projects-title">Local projects</h2></div><IconButton icon={X} label="Close projects" onClick={() => setProjectOpen(false)} /></div><p className="dialog-intro">Project data is stored in this browser's local database. It is never uploaded.</p><div className="project-list scrollbar-thin">{projects.length ? projects.map((project) => <button className="project-row" key={project.id} onClick={() => void openLocal(project.id)}><div className="project-file"><Box size={16} /></div><div><b>{project.name}</b><small>Saved {new Date(project.updatedAt).toLocaleString()} · {project.sources.length} source file{project.sources.length === 1 ? '' : 's'}</small></div><ChevronRight size={14} /></button>) : <div className="project-list-empty"><HardDrive size={19} /><b>No saved projects</b><span>Save a scene locally to find it here.</span></div>}</div><div className="dialog-footer"><button className="secondary-action" onClick={() => { setProjectOpen(false); clearScene(); }}><FilePlus2 size={14} /> New project</button><button className="primary-action" onClick={() => setProjectOpen(false)}>Done</button></div></section></div>}
@@ -546,6 +562,12 @@ function App() {
         onExport={() => void exportResource()}
         onClear={() => { setResourcePackage(null); setNotice({ kind: 'info', message: 'Resource package cleared.' }); }}
       />
+      {textureStudioOpen && resourcePackage && <NativeTextureStudioDialog
+        resource={resourcePackage}
+        onClose={() => setTextureStudioOpen(false)}
+        onReplace={replaceNativeFile}
+        onPreviewModel={previewNativeModel}
+      />}
     </main>
   );
 }

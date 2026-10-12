@@ -10,7 +10,75 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: native-assets
+    description: Local FiveM native asset preview and texture replacement
 paths:
+  /native-assets/decode-ytd:
+    post:
+      operationId: decodeYtdTextures
+      tags: [native-assets]
+      summary: Decode a YTD texture dictionary for preview
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/YtdDecodeRequest"
+      responses:
+        "200":
+          description: Texture previews and metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/YtdPreview"
+        "400":
+          description: Invalid request
+        "422":
+          description: Unsupported or invalid GTA asset
+  /native-assets/replace-ytd:
+    post:
+      operationId: replaceYtdTexture
+      tags: [native-assets]
+      summary: Replace one YTD texture and rebuild the dictionary
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/YtdReplaceRequest"
+      responses:
+        "200":
+          description: Rebuilt YTD file
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/YtdReplaceResponse"
+        "400":
+          description: Invalid request
+        "422":
+          description: Unsupported or invalid GTA asset
+  /native-assets/preview-yft:
+    post:
+      operationId: previewYft
+      tags: [native-assets]
+      summary: Convert a YFT and matching YTD files to a textured 3D preview
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/YftPreviewRequest"
+      responses:
+        "200":
+          description: GLB preview model and conversion details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/YftPreview"
+        "400":
+          description: Invalid request
+        "422":
+          description: Unsupported or invalid GTA asset
   /healthz:
     get:
       operationId: healthCheck
@@ -26,6 +94,109 @@ paths:
                 $ref: "#/components/schemas/HealthStatus"
 components:
   schemas:
+    YtdDecodeRequest:
+      type: object
+      required: [fileName, dataBase64]
+      properties:
+        fileName:
+          type: string
+        dataBase64:
+          type: string
+          description: Base64-encoded native YTD file
+    YtdTexturePreview:
+      type: object
+      required: [name, width, height, format, mipCount]
+      properties:
+        name:
+          type: string
+        width:
+          type: integer
+        height:
+          type: integer
+        format:
+          type: string
+        mipCount:
+          type: integer
+        previewBase64:
+          type: [string, "null"]
+        previewError:
+          type: [string, "null"]
+    YtdPreview:
+      type: object
+      required: [fileName, textures]
+      properties:
+        fileName:
+          type: string
+        textures:
+          type: array
+          items:
+            $ref: "#/components/schemas/YtdTexturePreview"
+    YtdReplaceRequest:
+      type: object
+      required: [fileName, dataBase64, textureName, imageBase64]
+      properties:
+        fileName:
+          type: string
+        dataBase64:
+          type: string
+          description: Base64-encoded source YTD file
+        textureName:
+          type: string
+        imageBase64:
+          type: string
+          description: Base64-encoded PNG, JPEG, or WebP replacement
+    YtdReplaceResponse:
+      type: object
+      required: [fileName, dataBase64, texture]
+      properties:
+        fileName:
+          type: string
+        dataBase64:
+          type: string
+          description: Base64-encoded rebuilt YTD file
+        texture:
+          $ref: "#/components/schemas/YtdTexturePreview"
+    YftTextureDictionary:
+      type: object
+      required: [name, dataBase64]
+      properties:
+        name:
+          type: string
+        dataBase64:
+          type: string
+          description: Base64-encoded native YTD file
+    YftPreviewRequest:
+      type: object
+      required: [fileName, modelBase64, textureDictionaries]
+      properties:
+        fileName:
+          type: string
+        modelBase64:
+          type: string
+          description: Base64-encoded native YFT file
+        textureDictionaries:
+          type: array
+          items:
+            $ref: "#/components/schemas/YftTextureDictionary"
+    YftPreview:
+      type: object
+      required: [fileName, modelBase64, meshCount, skippedMeshCount, textureCount, usedTextures]
+      properties:
+        fileName:
+          type: string
+        modelBase64:
+          type: string
+          description: Base64-encoded textured GLB preview
+        meshCount:
+          type: integer
+        skippedMeshCount:
+          type: integer
+        textureCount:
+          type: integer
+        usedTextures:
+          type: array
+          items:
+            type: string
     HealthStatus:
       type: object
       properties:
