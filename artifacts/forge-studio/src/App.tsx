@@ -8,12 +8,12 @@ import {
   X, ZoomIn,
 } from 'lucide-react';
 import { Viewport } from '@/components/Viewport';
-import { downloadBlob, exportModel, loadAsset, MAX_FILE_SIZE, validateFiles } from '@/lib/model-io';
+import { downloadBlob, expandArchives, exportModel, loadAsset, MAX_FILE_SIZE, validateFiles } from '@/lib/model-io';
 import { getProject, listProjects, saveProject, type LocalProject } from '@/lib/projects';
 
 type Notice = { kind: 'success' | 'error' | 'info'; message: string } | null;
 type Busy = { label: string; progress: number } | null;
-const supported = '.glb,.gltf,.obj,.stl,.mtl,.png,.jpg,.jpeg,.webp,.yft,.ytd,.ydr,.ydd,.ybn';
+const supported = '.glb,.gltf,.obj,.stl,.mtl,.png,.jpg,.jpeg,.webp,.yft,.ytd,.ydr,.ydd,.ybn,.zip';
 const unsupportedGame = ['YFT', 'YTD', 'YDR', 'YDD', 'YBN'];
 
 function meshStats(root: THREE.Object3D | null) {
@@ -177,11 +177,16 @@ function App() {
   const walkFiles = async (files: File[], mode: 'append' | 'replace' = 'append'): Promise<boolean> => {
     let progressTimer = 0;
     try {
-      const modelFile = validateFiles(files);
+      const hasZip = files.some((file) => file.name.toLowerCase().endsWith('.zip'));
+      if (hasZip) setBusy({ label: 'Opening ZIP package', progress: 4 });
+      const importFiles = await expandArchives(files, (completed, total, archiveName) => {
+        setBusy({ label: `Unpacking ${archiveName} (${completed}/${total})`, progress: Math.min(30, 5 + Math.round((completed / total) * 25)) });
+      });
+      const modelFile = validateFiles(importFiles);
       setBusy({ label: `Reading ${modelFile.name}`, progress: 8 });
       progressTimer = window.setInterval(() => setBusy((v) => v ? { ...v, progress: Math.min(v.progress + 13, 86) } : v), 120);
-      const modelFiles = files.filter((file) => ['glb', 'gltf', 'obj', 'stl'].includes(file.name.split('.').pop()?.toLowerCase() || ''));
-      const loadedAssets = await Promise.all(modelFiles.map((file) => loadAsset([file, ...files.filter((sidecar) => sidecar !== file)])));
+      const modelFiles = importFiles.filter((file) => ['glb', 'gltf', 'obj', 'stl'].includes(file.name.split('.').pop()?.toLowerCase() || ''));
+      const loadedAssets = await Promise.all(modelFiles.map((file) => loadAsset([file, ...importFiles.filter((sidecar) => sidecar !== file)])));
       window.clearInterval(progressTimer);
       setBusy({ label: 'Preparing scene', progress: 92 });
       const scene = mode === 'replace' || !root ? new THREE.Group() : root;
