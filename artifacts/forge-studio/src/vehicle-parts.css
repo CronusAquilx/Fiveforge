@@ -1,0 +1,24 @@
+.vehicle-parts-section{padding-bottom:13px}
+.vehicle-parts-heading{display:flex;align-items:center;justify-content:space-between}
+.vehicle-parts-heading>span:first-child{display:flex;align-items:center;gap:6px}
+.vehicle-parts-heading svg{color:#b9944c}
+.vehicle-parts-heading>span:last-child{color:#848587;font-size:9px}
+.vehicle-part-group{margin-top:11px}
+.vehicle-part-group-title{margin-bottom:5px;color:#707275;font:8px var(--app-font-mono);letter-spacing:.1em}
+.vehicle-part-row{border-bottom:1px solid #292a2c}
+.vehicle-part-toggle{display:flex;align-items:center;gap:8px;width:100%;min-height:35px;padding:5px 2px;text-align:left;border:0;background:transparent;color:#c9caca}
+.vehicle-part-toggle:hover:not(:disabled){background:#222325;color:#e6d6b1}
+.vehicle-part-state{display:grid;place-items:center;flex:none;color:#777a7c}
+.vehicle-part-toggle[aria-pressed="true"] .vehicle-part-state{color:#d2ae61}
+.vehicle-part-copy{display:flex;flex-direction:column;gap:3px;min-width:0}
+.vehicle-part-copy b{font-size:10px;font-weight:600}
+.vehicle-part-copy small{overflow:hidden;color:#77797b;font-size:8px;text-overflow:ellipsis;white-space:nowrap}
+.vehicle-part-row.has-error .vehicle-part-copy small{color:#d18373}
+.vehicle-parts-note{margin:9px 0 0;color:#727476;font-size:9px;line-height:1.5}
+.part-spinner{animation:vehicle-part-spin 1s linear infinite}
+.gta-material-section .info-row{min-height:23px}
+.gta-material-section>p{margin:8px 0;color:#858789;font-size:9px;line-height:1.55}
+.gta-material-section>a{color:#d0ad62;font-size:9px;text-decoration:none}
+.gta-material-section>a:hover{text-decoration:underline}
+@keyframes vehicle-part-spin{to{transform:rotate(360deg)}}
+@media(max-width:767px){.vehicle-part-toggle{min-height:40px}.vehicle-part-copy b{font-size:11px}}

@@ -67,9 +67,75 @@ function runProcessor(operation: string, payload: unknown): Promise<Record<strin
   });
 }
 
+function runBinaryProcessor(operation: string, payload: Buffer): Promise<{ metadata: Record<string, unknown>; model: Buffer }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("uv", ["run", "--project", workspaceRoot, "python", pythonScript, operation], {
+      cwd: workspaceRoot,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const stdout: Buffer[] = [];
+    let stderr = "";
+    let outputBytes = 0;
+    let settled = false;
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      child.kill();
+      reject(error);
+    };
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: Buffer | string) => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      outputBytes += buffer.length;
+      if (outputBytes > MAX_PROCESS_OUTPUT) {
+        fail(new Error("The decoded asset is too large to return safely."));
+        return;
+      }
+      stdout.push(buffer);
+    });
+    child.stderr.on("data", (chunk: string) => {
+      if (stderr.length < 6000) stderr += chunk;
+    });
+    child.on("error", (error) => fail(new Error(`Could not start the native asset reader: ${error.message}`)));
+    child.stdin.on("error", () => undefined);
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      const output = Buffer.concat(stdout);
+      if (code !== 0) {
+        let result: Record<string, unknown>;
+        try {
+          result = JSON.parse(output.toString("utf8")) as Record<string, unknown>;
+        } catch {
+          reject(new Error(stderr.trim() || "The native asset reader returned an invalid response."));
+          return;
+        }
+        reject(new Error(typeof result.error === "string" ? result.error : stderr.trim() || "The native asset could not be read."));
+        return;
+      }
+      if (output.length < 5) {
+        reject(new Error("The native asset reader returned an incomplete binary model."));
+        return;
+      }
+      const metadataLength = output.readUInt32BE(0);
+      if (metadataLength < 2 || metadataLength > 1024 * 1024 || 4 + metadataLength >= output.length) {
+        reject(new Error("The native asset reader returned invalid preview metadata."));
+        return;
+      }
+      try {
+        const metadata = JSON.parse(output.subarray(4, 4 + metadataLength).toString("utf8")) as Record<string, unknown>;
+        resolve({ metadata, model: output.subarray(4 + metadataLength) });
+      } catch {
+        reject(new Error("The native asset reader returned invalid preview metadata."));
+      }
+    });
+    child.stdin.end(payload);
+  });
+}
+
 function sendError(response: Response, error: unknown) {
   const message = error instanceof Error ? error.message : "The native asset could not be processed.";
-  response.status(message.includes("larger than") ? 413 : 422).json({ error: message });
+  response.status(message.includes("larger than") || message.includes("exceed") || message.includes("oversized") ? 413 : 422).json({ error: message });
 }
 
 router.post("/decode-ytd", async (request: Request, response: Response) => {
@@ -114,6 +180,21 @@ router.post("/preview-yft", async (request: Request, response: Response) => {
   }
   try {
     response.json(await runProcessor("preview-yft", body));
+  } catch (error) {
+    sendError(response, error);
+  }
+});
+
+router.post("/preview-yft-binary", express.raw({ type: "application/octet-stream", limit: "360mb" }), async (request: Request, response: Response) => {
+  if (!Buffer.isBuffer(request.body) || request.body.length < 6) {
+    response.status(400).json({ error: "Choose a valid YFT and up to 24 matching YTD files." });
+    return;
+  }
+  try {
+    const result = await runBinaryProcessor("preview-yft-binary", request.body);
+    response.setHeader("Content-Type", "model/gltf-binary");
+    response.setHeader("X-Forge-Preview-Metadata", Buffer.from(JSON.stringify(result.metadata), "utf8").toString("base64"));
+    response.send(result.model);
   } catch (error) {
     sendError(response, error);
   }

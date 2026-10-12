@@ -10,17 +10,100 @@ import {
 import { Viewport } from '@/components/Viewport';
 import ResourcePackageDialog from '@/components/ResourcePackageDialog';
 import NativeTextureStudioDialog from '@/components/NativeTextureStudioDialog';
+import VehiclePartsPanel, { type VehiclePartControl } from '@/components/VehiclePartsPanel';
 import './native-texture-studio.css';
+import './vehicle-parts.css';
 import './viewport-tools.css';
 import { downloadBlob, expandArchives, exportModel, loadAsset, MAX_FILE_SIZE, validateFiles } from '@/lib/model-io';
 import { getProject, listProjects, saveProject, type LocalProject } from '@/lib/projects';
-import { buildFiveMResourceZip, readResourcePackage, type ResourcePackage } from '@/lib/resource-package';
+import { buildFiveMResourceZip, readResourcePackage, type ResourcePackage, type ResourcePackageFile } from '@/lib/resource-package';
 import { previewNativeYft } from '@/lib/native-yft-preview';
 
 type Notice = { kind: 'success' | 'error' | 'info'; message: string } | null;
 type Busy = { label: string; progress: number } | null;
+type VehicleAddonPart = VehiclePartControl & { file: File };
 const supported = '.glb,.gltf,.obj,.stl,.mtl,.png,.jpg,.jpeg,.webp,.yft,.ytd,.ydr,.ydd,.ybn,.ytyp,.ymap,.ymf,.ycd,.ymt,.yld,.ypt,.meta,.lua,.zip';
 const unsupportedGame = ['YFT', 'YTD', 'YDR', 'YDD', 'YBN', 'YTYP', 'YMAP'];
+
+function normalizeYftStem(path: string) {
+  return (path.split('/').pop() || path).replace(/\.yft$/i, '').replace(/_(?:hi|med|low|vlow)$/i, '').toLocaleLowerCase();
+}
+
+function isHighLodYft(path: string) {
+  return /_hi\.yft$/i.test(path);
+}
+
+async function getVehicleIdentifiers(files: ResourcePackageFile[]) {
+  const modelNames = new Set<string>();
+  const gameNames = new Set<string>();
+  for (const item of files) {
+    if (!item.path.toLowerCase().endsWith('vehicles.meta') || item.file.size > 8 * 1024 * 1024) continue;
+    const text = await item.file.text();
+    for (const match of text.matchAll(/<modelName(?:\s[^>]*)?\s*>([^<]+)<\/modelName\s*>/gi)) {
+      const value = match[1].trim();
+      if (value) modelNames.add(value.toLocaleLowerCase());
+    }
+    for (const match of text.matchAll(/<gameName(?:\s[^>]*)?\s*>([^<]+)<\/gameName\s*>/gi)) {
+      const value = match[1].trim();
+      if (value) gameNames.add(value.toLocaleLowerCase());
+    }
+  }
+  return { modelNames: [...modelNames], gameNames: [...gameNames] };
+}
+
+function chooseMainYft(yfts: ResourcePackageFile[], identifiers: string[]) {
+  if (!yfts.length) return null;
+  const matching = yfts.filter((item) => identifiers.includes(normalizeYftStem(item.path)));
+  if (matching.length) {
+    const base = matching.find((item) => !isHighLodYft(item.path)) || matching[0];
+    return matching.find((item) => isHighLodYft(item.path) && normalizeYftStem(item.path) === normalizeYftStem(base.path)) || base;
+  }
+  const ranked = [...yfts].sort((a, b) => {
+    if (isHighLodYft(a.path) !== isHighLodYft(b.path)) return isHighLodYft(a.path) ? 1 : -1;
+    return b.file.size - a.file.size;
+  });
+  const base = ranked.find((item) => !isHighLodYft(item.path)) || ranked[0];
+  return yfts.find((item) => isHighLodYft(item.path) && normalizeYftStem(item.path) === normalizeYftStem(base.path)) || base;
+}
+
+function describeVehiclePart(path: string, identifiers: string[]) {
+  let label = (path.split('/').pop() || path).replace(/\.yft$/i, '').replace(/_(?:hi|med|low|vlow)$/i, '');
+  for (const identifier of identifiers.filter(Boolean).sort((a, b) => b.length - a.length)) {
+    label = label.replace(new RegExp(`^${identifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[_ .-]*`, 'i'), '');
+  }
+  label = label.replace(/^ff[_ .-]*/i, 'FF ');
+  label = label.replace(/bumr/ig, 'bumper').replace(/grill/ig, 'grille');
+  label = label.replace(/([a-z])(\d)/ig, '$1 $2').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!label) label = 'Tuning part';
+  if (/^ff\b/i.test(label)) return `FF ${label.slice(2).trim().replace(/\b\w/g, (letter) => letter.toUpperCase())}`;
+  return label.replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function inlineVehiclePart(name: string) {
+  const match = name.match(/(?:^|[_ .-])(extra|modkit|mod|tuning)[_ .:-]*([a-z0-9]+)/i);
+  if (!match) return null;
+  const prefix = match[1].toLowerCase();
+  const value = match[2].toLowerCase();
+  const category = prefix === 'extra' ? 'Extra' : prefix === 'tuning' || prefix === 'modkit' ? 'Tuning' : 'Mod';
+  const labelValue = value.replace(/([a-z])(\d)/g, '$1 $2').replace(/[_-]+/g, ' ');
+  return { id: `${prefix}:${value}`, label: `${category} ${labelValue.replace(/\b\w/g, (letter) => letter.toUpperCase())}` };
+}
+
+function gtaMaterialMetadata(name: string) {
+  const marker = ' ||GTA||';
+  const markerIndex = name.lastIndexOf(marker);
+  if (markerIndex < 0) return null;
+  try {
+    const metadata = JSON.parse(decodeURIComponent(name.slice(markerIndex + marker.length))) as {
+      shader?: string;
+      textures?: Record<string, string>;
+      baseColor?: number[];
+    };
+    return { ...metadata, materialName: name.slice(0, markerIndex).split(' · ')[0] };
+  } catch {
+    return null;
+  }
+}
 
 function meshStats(root: THREE.Object3D | null) {
   let meshes = 0, triangles = 0, materials = 0;
@@ -101,10 +184,12 @@ function App() {
   const [resourceOpen, setResourceOpen] = useState(false);
   const [textureStudioOpen, setTextureStudioOpen] = useState(false);
   const [resourcePackage, setResourcePackage] = useState<ResourcePackage | null>(null);
+  const [vehicleAddonParts, setVehicleAddonParts] = useState<VehicleAddonPart[]>([]);
   const [projects, setProjects] = useState<LocalProject[]>([]);
   const [exportName, setExportName] = useState('vehicle_asset');
   const [textureShown, setTextureShown] = useState(true);
   const [nextImportMode, setNextImportMode] = useState<'append' | 'replace'>('append');
+  const vehicleTextureFiles = useRef<File[]>([]);
 
   useEffect(() => {
     const mobile = window.matchMedia('(max-width: 767px)');
@@ -129,12 +214,32 @@ function App() {
     return found || root;
   }, [root, selectedId]);
   const stats = useMemo(() => meshStats(root), [root, sourceFiles.length, sceneRevision]);
+  const inlineParts = useMemo(() => {
+    if (!root) return [];
+    const groups = new Map<string, { label: string; nodes: THREE.Object3D[] }>();
+    root.traverse((node) => {
+      if (!(node as THREE.Mesh).isMesh) return;
+      const part = inlineVehiclePart(node.name);
+      if (!part) return;
+      const group = groups.get(part.id) || { label: part.label, nodes: [] };
+      group.nodes.push(node);
+      groups.set(part.id, group);
+    });
+    return [...groups.entries()]
+      .map(([id, group]) => ({ id, label: group.label, enabled: group.nodes.some((node) => node.visible) }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [root, sceneRevision]);
   const activeMesh = meshFrom(selected);
   const material = activeMesh ? (Array.isArray(activeMesh.material) ? activeMesh.material[0] : activeMesh.material) : null;
   const standard = material as THREE.MeshStandardMaterial | null;
+  const gtaMaterial = material ? gtaMaterialMetadata(material.name || '') : null;
   const supportsPbr = !!material && 'roughness' in material && 'metalness' in material;
   const textureRef = useRef<THREE.Texture | null>(null);
   const baseTexture = standard?.map || textureRef.current;
+  const displayedAddonParts = vehicleAddonParts.map((part) => {
+    const group = root?.children.find((child) => child.userData.forgeVehiclePartId === part.id);
+    return { ...part, enabled: group ? group.visible : Boolean(part.loading && part.enabled) };
+  });
 
   useEffect(() => {
     if (!notice) return;
@@ -213,6 +318,8 @@ function App() {
       if (mode === 'replace' && !preserveResource) {
         setResourcePackage(null);
         setResourceOpen(false);
+        setVehicleAddonParts([]);
+        vehicleTextureFiles.current = [];
       }
       setRoot(scene); setSceneRevision((v) => v + 1); setSelection(meshFrom(firstAsset.root) || firstAsset.root); setFormat(loadedAssets.map((item) => item.format).join(' + '));
        setSourceFiles((existing) => mode === 'replace' ? originalFiles : [...existing, ...originalFiles]);
@@ -278,25 +385,71 @@ function App() {
       const resource = packageOverride || await readResourcePackage(files);
       setResourcePackage(resource);
       setResourceOpen(false);
-      const ytdFiles = files.filter((file) => file.name.toLowerCase().endsWith('.ytd'));
-      const modelStem = modelFile.name.replace(/\.yft$/i, '').replace(/_hi$/i, '').toLocaleLowerCase();
-      const prioritizedYtds = [
-        ...ytdFiles.filter((file) => file.name.replace(/\.ytd$/i, '').toLocaleLowerCase() === modelStem),
-        ...ytdFiles.filter((file) => file.name.replace(/\.ytd$/i, '').toLocaleLowerCase() !== modelStem),
-      ];
-      const selectedYtds: File[] = [];
-      let previewBytes = modelFile.size;
-      for (const file of prioritizedYtds) {
-        if (selectedYtds.length >= 24 || previewBytes + file.size > MAX_FILE_SIZE) continue;
-        selectedYtds.push(file);
-        previewBytes += file.size;
+      const ytdFiles = resource.files.filter((item) => item.path.toLowerCase().endsWith('.ytd'));
+      const yftFiles = resource.files.filter((item) => item.path.toLowerCase().endsWith('.yft'));
+      const vehicleIdentifiers = await getVehicleIdentifiers(resource.files);
+      const knownIdentifiers = [...new Set([...vehicleIdentifiers.modelNames, ...vehicleIdentifiers.gameNames])];
+      const modelStem = normalizeYftStem(modelFile.name);
+      const modelEntry = yftFiles.find((item) => item.file === modelFile) ||
+        yftFiles.find((item) => (item.path.split('/').pop() || '').toLowerCase() === modelFile.name.toLowerCase());
+      const modelPair = yftFiles
+        .filter((item) => normalizeYftStem(item.path) === modelStem)
+        .sort((a, b) => Number(isHighLodYft(a.path)) - Number(isHighLodYft(b.path)));
+      const modelCandidates = [...new Map([modelEntry, ...modelPair].filter((item): item is ResourcePackageFile => Boolean(item)).map((item) => [item.path.toLowerCase(), item])).values()];
+      if (!modelCandidates.length) modelCandidates.push({ path: modelFile.name, file: modelFile, kind: 'native' });
+
+      let preview: Awaited<ReturnType<typeof previewNativeYft>> | null = null;
+      let selectedModel = modelFile;
+      let selectedYtds: File[] = [];
+      let lastPreviewError: unknown;
+      for (const candidate of modelCandidates) {
+        const stem = normalizeYftStem(candidate.path);
+        const prioritizedYtds = [
+          ...ytdFiles.filter((item) => normalizeYftStem(item.path.replace(/\.ytd$/i, '.yft')) === stem),
+          ...ytdFiles.filter((item) => normalizeYftStem(item.path.replace(/\.ytd$/i, '.yft')) !== stem),
+        ];
+        const candidateYtds: File[] = [];
+        let previewBytes = candidate.file.size;
+        for (const item of prioritizedYtds) {
+          if (candidateYtds.length >= 24 || previewBytes + item.file.size > MAX_FILE_SIZE) continue;
+          candidateYtds.push(item.file);
+          previewBytes += item.file.size;
+        }
+        try {
+          preview = await previewNativeYft(candidate.file, candidateYtds);
+          selectedModel = candidate.file;
+          selectedYtds = candidateYtds;
+          break;
+        } catch (error) {
+          lastPreviewError = error;
+        }
       }
-      const preview = await previewNativeYft(modelFile, selectedYtds);
-      const otherModels = files.filter((file) => ['glb', 'gltf', 'obj', 'stl'].includes(file.name.split('.').pop()?.toLowerCase() || ''));
+      if (!preview) throw lastPreviewError instanceof Error ? lastPreviewError : new Error('No compatible YFT LOD could be previewed.');
+
+      vehicleTextureFiles.current = selectedYtds;
+      const addonFiles = yftFiles.filter((item) => {
+        const stem = normalizeYftStem(item.path);
+        return stem !== modelStem && !knownIdentifiers.includes(stem);
+      });
+      const nextAddonParts: VehicleAddonPart[] = addonFiles.map((item) => ({
+        id: item.path.toLocaleLowerCase(),
+        label: describeVehiclePart(item.path, knownIdentifiers),
+        enabled: false,
+        source: item.path,
+        file: item.file,
+      }));
+
+      const otherModels = resource.files
+        .filter((item) => ['glb', 'gltf', 'obj', 'stl'].includes(item.path.split('.').pop()?.toLowerCase() || ''))
+        .map((item) => item.file);
       const originalFiles = resource.files.map((item) => item.file);
-      const loaded = await walkFiles([preview.model, ...otherModels, ...files.filter((file) => ![modelFile, ...ytdFiles, ...otherModels].includes(file))], mode, originalFiles, true);
+      const importedCompanions = files.filter((file) => ![modelFile, ...ytdFiles.map((item) => item.file), ...otherModels].includes(file));
+      const loaded = await walkFiles([preview.model, ...otherModels, ...importedCompanions], mode, originalFiles, true);
       if (!loaded) return;
-      setFormat(`${modelFile.name} · YFT preview`);
+      setVehicleAddonParts(nextAddonParts);
+      const modelLabel = vehicleIdentifiers.modelNames.find((name) => name === normalizeYftStem(selectedModel.name)) || selectedModel.name.replace(/\.yft$/i, '');
+      if (mode === 'replace') setProjectName(modelLabel);
+      setFormat(`${selectedModel.name} · YFT preview`);
       const textureStatus = preview.textureCount
         ? `${preview.textureCount} YTD texture${preview.textureCount === 1 ? '' : 's'} matched`
         : selectedYtds.length
@@ -309,9 +462,11 @@ function App() {
         ? ` Unmatched texture names: ${preview.unmatchedTextures.slice(0, 3).join(', ')}${preview.unmatchedTextures.length > 3 ? '…' : ''}.`
         : '';
       const omitted = selectedYtds.length < ytdFiles.length ? ' Some YTDs were skipped to stay within preview limits.' : '';
+      const textureErrors = preview.textureErrors.length ? ` ${preview.textureErrors.length} unreadable YTD${preview.textureErrors.length === 1 ? ' was' : 's were'} skipped; the car model still loaded.` : '';
+      const shaderSummary = preview.gtaShaders.length ? ` GTA shaders: ${preview.gtaShaders.slice(0, 3).join(', ')}${preview.gtaShaders.length > 3 ? '…' : ''}.` : '';
       setNotice({
         kind: preview.textureCount ? 'success' : 'info',
-        message: `Loaded ${preview.meshCount} usable YFT meshes; ${textureStatus}.${skippedMeshes}${unmatched}${omitted} Export a source-preserving resource ZIP for the original YFT and YTD files. Viewport geometry edits export as GLB, not native YFT.`,
+        message: `Loaded ${preview.meshCount} usable YFT meshes; ${textureStatus}.${skippedMeshes}${unmatched}${omitted}${textureErrors}${shaderSummary} Export a source-preserving resource ZIP for the original YFT and YTD files. Viewport geometry edits export as GLB, not native YFT.`,
       });
     } catch (error) {
       setBusy(null);
@@ -444,13 +599,16 @@ function App() {
       setSourceFiles(resource.files.map((item) => item.file));
       const yfts = resource.files.filter((item) => item.path.toLowerCase().endsWith('.yft'));
       if (yfts.length) {
-        const model = yfts.find((item) => /_hi\.yft$/i.test(item.path)) || yfts[0];
+        const identifiers = await getVehicleIdentifiers(resource.files);
+        const model = chooseMainYft(yfts, [...identifiers.modelNames, ...identifiers.gameNames]) || yfts[0];
         const previewFiles = [
           model.file,
           ...resource.files.filter((item) => item.path.toLowerCase().endsWith('.ytd')).map((item) => item.file),
         ];
         await loadYftIntoScene(previewFiles, model.file, 'replace', resource);
       } else {
+        vehicleTextureFiles.current = [];
+        setVehicleAddonParts([]);
         setResourceOpen(true);
         const nativeCount = resource.files.filter((file) => file.kind === 'native').length;
         setNotice({
@@ -499,6 +657,48 @@ function App() {
   const fitView = () => window.dispatchEvent(new CustomEvent('forge-fit-view'));
   const closeResourceDialog = useCallback(() => setResourceOpen(false), []);
   const toggleVisible = (item: THREE.Object3D) => { snapshot(); item.visible = !item.visible; setSceneRevision((v) => v + 1); setDirty(true); };
+  const toggleInlineVehiclePart = (id: string) => {
+    if (!root) return;
+    const matches: THREE.Object3D[] = [];
+    root.traverse((node) => {
+      if ((node as THREE.Mesh).isMesh && inlineVehiclePart(node.name)?.id === id) matches.push(node);
+    });
+    if (!matches.length) return;
+    snapshot();
+    const shouldShow = matches.every((node) => !node.visible);
+    matches.forEach((node) => { node.visible = shouldShow; });
+    setSceneRevision((value) => value + 1);
+    setDirty(true);
+  };
+  const toggleVehicleAddonPart = async (id: string) => {
+    const part = vehicleAddonParts.find((item) => item.id === id);
+    if (!part || part.loading || !root) return;
+    const existing = root.children.find((child) => child.userData.forgeVehiclePartId === id);
+    if (existing) {
+      snapshot();
+      existing.visible = !existing.visible;
+      setVehicleAddonParts((current) => current.map((item) => item.id === id ? { ...item, enabled: existing.visible, error: undefined } : item));
+      setSceneRevision((value) => value + 1);
+      setDirty(true);
+      return;
+    }
+    setVehicleAddonParts((current) => current.map((item) => item.id === id ? { ...item, enabled: true, loading: true, error: undefined } : item));
+    try {
+      const preview = await previewNativeYft(part.file, vehicleTextureFiles.current);
+      const loaded = await loadAsset([preview.model]);
+      loaded.root.name = part.label;
+      loaded.root.userData.forgeVehiclePartId = id;
+      snapshot();
+      root.add(loaded.root);
+      setVehicleAddonParts((current) => current.map((item) => item.id === id ? { ...item, enabled: true, loading: false, error: undefined } : item));
+      setSceneRevision((value) => value + 1);
+      setDirty(true);
+    } catch (error) {
+      setVehicleAddonParts((current) => current.map((item) => item.id === id
+        ? { ...item, enabled: false, loading: false, error: error instanceof Error ? error.message : 'Could not load this part.' }
+        : item));
+    }
+  };
   const toggleLock = (item: THREE.Object3D) => { snapshot(); item.userData.forgeLocked = !item.userData.forgeLocked; setSceneRevision((v) => v + 1); setDirty(true); };
   const setSelection = (item: THREE.Object3D) => {
     setSelectedId(item.uuid);
@@ -510,7 +710,7 @@ function App() {
   const clearScene = () => {
     if (dirty && !window.confirm('Discard unsaved changes and create a new project?')) return;
     setRoot(null); setSourceFiles([]); setSelectedId(null); setFormat('—'); setProjectName('Untitled project'); setHasSavedProject(false);
-    setResourcePackage(null); setResourceOpen(false); setTextureStudioOpen(false);
+    setResourcePackage(null); setResourceOpen(false); setTextureStudioOpen(false); setVehicleAddonParts([]); vehicleTextureFiles.current = [];
     setProjectId(crypto.randomUUID()); setDirty(false); history.current = []; future.current = []; hiddenTextures.current.clear(); textureRef.current = null; setTextureShown(true);
   };
   const openImport = (mode: 'append' | 'replace') => {
@@ -634,6 +834,12 @@ function App() {
               <TransformSection title="Position" values={selected?.position.toArray() || [0, 0, 0]} onChange={(axis, value) => setTransform('position', axis, value)} />
               <TransformSection title="Rotation" values={selected ? [THREE.MathUtils.radToDeg(selected.rotation.x), THREE.MathUtils.radToDeg(selected.rotation.y), THREE.MathUtils.radToDeg(selected.rotation.z)] : [0, 0, 0]} onChange={(axis, value) => setTransform('rotation', axis, value)} />
               <TransformSection title="Scale" values={selected?.scale.toArray() || [1, 1, 1]} onChange={(axis, value) => setTransform('scale', axis, value)} />
+              <VehiclePartsPanel
+                inlineParts={inlineParts}
+                addonParts={displayedAddonParts}
+                onToggleInline={toggleInlineVehiclePart}
+                onToggleAddon={(id) => { void toggleVehicleAddonPart(id); }}
+              />
               <div className="inspector-section">
                 <div className="section-title">GEOMETRY</div>
                 <InfoRow label="Meshes" value={String(stats.meshes)} /><InfoRow label="Triangles" value={stats.triangles.toLocaleString()} /><InfoRow label="Materials" value={String(stats.materials)} />
@@ -645,7 +851,13 @@ function App() {
             </div> :
             <div className="inspector-body scrollbar-thin">
               {!activeMesh || !standard || !supportsPbr ? <div className="inspector-empty"><div className="empty-glyph"><Layers3 size={17} /></div><b>{activeMesh ? 'Unsupported material' : 'No material selected'}</b><span>{activeMesh ? 'This material type is read-only. Standard PBR controls are available for MeshStandard materials.' : 'Select a mesh with a standard material.'}</span></div> : <>
-                <div className="material-head"><div className="material-swatch" style={{ background: `#${standard.color.getHexString()}` }} /><div><strong>{standard.name || 'Material'}</strong><small>{standard.type.toUpperCase()}</small></div></div>
+                <div className="material-head"><div className="material-swatch" style={{ background: `#${standard.color.getHexString()}` }} /><div><strong>{gtaMaterial?.materialName || standard.name || 'Material'}</strong><small>{gtaMaterial?.shader ? `GTA V · ${gtaMaterial.shader}` : standard.type.toUpperCase()}</small></div></div>
+                {gtaMaterial && <div className="inspector-section gta-material-section">
+                  <div className="section-title">GTA V MATERIAL DATA</div>
+                  {Object.entries(gtaMaterial.textures || {}).map(([slot, textureName]) => <InfoRow key={`${slot}-${textureName}`} label={slot} value={textureName} />)}
+                  <p>Viewport material is a PBR approximation; GTA’s game shader is identified here but is not executed in the browser.</p>
+                  <a href="https://docs.sollumz.org/2.6/documentation/fragments.yft/vehicle-shaders" target="_blank" rel="noreferrer">GTA vehicle shader and paint reference ↗</a>
+                </div>}
                 <div className="inspector-section"><div className="section-title">SURFACE</div><label className="color-field"><span>Base color</span><div><input type="color" value={`#${standard.color.getHexString()}`} onChange={(e) => updateMaterial('color', e.target.value)} /><code>{standard.color.getHexString().toUpperCase()}</code></div></label>
                   <RangeField label="Roughness" value={standard.roughness ?? 0.5} onChange={(v) => updateMaterial('roughness', v)} /><RangeField label="Metalness" value={standard.metalness ?? 0} onChange={(v) => updateMaterial('metalness', v)} />
                 </div>
@@ -655,7 +867,7 @@ function App() {
                   <label className="check-row"><input type="checkbox" checked={textureShown} disabled={!baseTexture} onChange={(e) => { setTextureShown(e.target.checked); if (standard) { if (e.target.checked) { standard.map = hiddenTextures.current.get(standard.uuid) || textureRef.current; hiddenTextures.current.delete(standard.uuid); } else if (standard.map) { hiddenTextures.current.set(standard.uuid, standard.map); textureRef.current = standard.map; standard.map = null; } standard.needsUpdate = true; setSceneRevision((v) => v + 1); setDirty(true); } }} /> Display texture on model</label>
                   {baseTexture && <><RangeField label={`Repeat U · ${baseTexture.repeat.x.toFixed(2)}`} value={Math.min(baseTexture.repeat.x / 4, 1)} onChange={(v) => { baseTexture.wrapS = THREE.RepeatWrapping; baseTexture.repeat.x = Math.max(.1, v * 4); baseTexture.needsUpdate = true; setSceneRevision((n) => n + 1); setDirty(true); }} /><RangeField label={`Repeat V · ${baseTexture.repeat.y.toFixed(2)}`} value={Math.min(baseTexture.repeat.y / 4, 1)} onChange={(v) => { baseTexture.wrapT = THREE.RepeatWrapping; baseTexture.repeat.y = Math.max(.1, v * 4); baseTexture.needsUpdate = true; setSceneRevision((n) => n + 1); setDirty(true); }} /><RangeField label={`Offset U · ${baseTexture.offset.x.toFixed(2)}`} value={(baseTexture.offset.x + 1) / 2} onChange={(v) => { baseTexture.offset.x = v * 2 - 1; baseTexture.needsUpdate = true; setSceneRevision((n) => n + 1); setDirty(true); }} /><RangeField label={`Offset V · ${baseTexture.offset.y.toFixed(2)}`} value={(baseTexture.offset.y + 1) / 2} onChange={(v) => { baseTexture.offset.y = v * 2 - 1; baseTexture.needsUpdate = true; setSceneRevision((n) => n + 1); setDirty(true); }} /></>}
                 </div>
-                <div className="data-map-note"><ShieldCheck size={13} /><span>Only base-color images are edited here. Normal, roughness and metalness maps remain untouched.</span></div>
+                 <div className="data-map-note"><ShieldCheck size={13} /><span>Base color and available normal maps are approximated in the viewport. Other GTA samplers are listed above; original YTD files stay preserved in the resource ZIP.</span></div>
               </>}
             </div>}
         </aside>}

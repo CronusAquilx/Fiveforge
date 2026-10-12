@@ -113,15 +113,24 @@ export async function readResourcePackage(
       }).filter(({ path }) => !cleanMacMetadata(path));
 
       let actualTotal = 0;
-      for (let index = 0; index < prepared.length; index++) {
-        const { entry, path } = prepared[index];
-        const bytes = await entry.async('uint8array');
-        actualTotal += bytes.byteLength;
-        if (actualTotal > MAX_TOTAL_SIZE) throw new Error(`“${input.name}” expands beyond the 350 MB safety limit.`);
-        const leaf = path.split('/').pop() || path;
-        rawFiles.push({ path, file: new File([bytes.slice().buffer as ArrayBuffer], leaf, { type: 'application/octet-stream' }) });
-        onProgress?.(index + 1, prepared.length, input.name);
-      }
+      let completed = 0;
+      let nextIndex = 0;
+      const unpacked = new Array<{ path: string; file: File }>(prepared.length);
+      const unpackWorker = async () => {
+        while (nextIndex < prepared.length) {
+          const index = nextIndex++;
+          const { entry, path } = prepared[index];
+          const bytes = await entry.async('uint8array');
+          actualTotal += bytes.byteLength;
+          if (actualTotal > MAX_TOTAL_SIZE) throw new Error(`“${input.name}” expands beyond the 350 MB safety limit.`);
+          const leaf = path.split('/').pop() || path;
+          unpacked[index] = { path, file: new File([bytes.buffer as ArrayBuffer], leaf, { type: 'application/octet-stream' }) };
+          completed++;
+          onProgress?.(completed, prepared.length, input.name);
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(4, prepared.length) }, () => unpackWorker()));
+      rawFiles.push(...unpacked);
     } else {
       rawFiles.push({ path: safePath(input.webkitRelativePath || input.name), file: input });
     }
