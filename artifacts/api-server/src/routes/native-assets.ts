@@ -263,4 +263,19 @@ router.post("/preview-yft-binary", express.raw({ type: "application/octet-stream
   }
 });
 
+router.post("/rebuild-yft-binary", express.raw({ type: "application/octet-stream", limit: "360mb" }), async (request: Request, response: Response) => {
+  if (!Buffer.isBuffer(request.body) || request.body.length < 6) {
+    response.status(400).json({ error: "Choose a valid native YFT edit bundle." });
+    return;
+  }
+  try {
+    const result = await runBinaryProcessor("rebuild-yft-binary", request.body);
+    response.setHeader("Content-Type", "application/octet-stream");
+    response.setHeader("X-Forge-Rebuild-Metadata", Buffer.from(JSON.stringify(result.metadata), "utf8").toString("base64"));
+    response.send(result.model);
+  } catch (error) {
+    sendError(response, error);
+  }
+});
+
 export default router;

@@ -248,7 +248,7 @@ export default function NativeTextureStudioDialog({ resource, onClose, onReplace
           {!loadingTextures && ytdFiles.length === 0 && (
             <div className="nt-empty">No YTD texture dictionary is included in this resource. Add its matching YTD to preview or replace vehicle textures.</div>
           )}
-          {yftFiles.length > 0 && <p className="nt-note">YFT preview loads into the regular editor, where you can adjust objects and materials and export a standard GLB. Replacing a texture rebuilds the selected YTD in this resource; edits to the preview do not rebuild the native YFT.</p>}
+          {yftFiles.length > 0 && <p className="nt-note">YFT preview loads into the regular editor. Resource export can rebuild whole-mesh transforms and hide/delete edits as native YFT; partial face-group edits and viewport material changes are refused. Replacing a texture rebuilds the selected YTD in this resource. Collision and vehicle physics are preserved unchanged.</p>}
           <p className="nt-note">Native files are sent to this app’s parser in memory for preview or rebuilding, then discarded. They are not saved by the API.</p>
           {error && <div className="nt-message error" role="alert">{error}</div>}
           {success && <div className="nt-message success" role="status">{success}</div>}

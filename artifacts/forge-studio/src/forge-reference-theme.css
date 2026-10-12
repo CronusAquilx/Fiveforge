@@ -1,0 +1,193 @@
+html:root {
+  --background: 225 14% 6%;
+  --foreground: 220 9% 91%;
+  --card: 225 12% 9%;
+  --card-foreground: 220 9% 91%;
+  --popover: 225 12% 10%;
+  --popover-foreground: 220 9% 91%;
+  --primary: 22 100% 65%;
+  --primary-foreground: 225 16% 8%;
+  --secondary: 225 9% 15%;
+  --secondary-foreground: 220 9% 91%;
+  --muted: 225 8% 14%;
+  --muted-foreground: 220 6% 57%;
+  --accent: 22 100% 65%;
+  --accent-foreground: 225 16% 8%;
+  --border: 225 7% 21%;
+  --input: 225 7% 19%;
+  --ring: 22 100% 65%;
+}
+
+html,
+body,
+#root {
+  background: #090a0e;
+}
+
+.studio-shell {
+  background: #0b0c10;
+  color: #e5e6e9;
+}
+
+.studio-shell .topbar {
+  background: #0d0e12;
+  border-bottom-color: #282a30;
+}
+
+.studio-shell .brand-lockup {
+  color: #f4f3f1;
+}
+
+.studio-shell .brand-name small,
+.studio-shell .local-tag,
+.studio-shell .toolbar-caption {
+  color: #7e8087;
+}
+
+.studio-shell .workspace {
+  background: #0a0b0f;
+}
+
+.studio-shell .left-rail,
+.studio-shell .right-rail {
+  background: #111217;
+  border-color: #282a30;
+}
+
+.studio-shell .viewport-column {
+  background: #090a0e;
+  border-inline: 1px solid #292b31;
+}
+
+.studio-shell .viewport-toolbar,
+.studio-shell .menu-strip,
+.studio-shell .statusbar,
+.studio-shell .bottom-note {
+  background: #0d0e12;
+  border-color: #282a30;
+}
+
+.studio-shell .view-stage {
+  background-color: #0a0b10;
+  background-image:
+    radial-gradient(circle, #33343a 0.75px, transparent 0.9px),
+    linear-gradient(135deg, #0a0b10 0%, #0d0e13 55%, #090a0e 100%);
+  background-size: 18px 18px, 100% 100%;
+}
+
+.studio-shell .view-stage:has(.welcome-card)::after {
+  content: "";
+  position: absolute;
+  z-index: 2;
+  inset: 4px;
+  border: 1px solid #f28c55;
+  box-shadow: inset 0 0 24px #ff8a4b12, 0 0 18px #ff8a4b0c;
+  pointer-events: none;
+}
+
+.studio-shell .welcome-card {
+  width: min(470px, calc(100% - 36px));
+  padding: 34px 32px 28px;
+  background: rgba(13, 14, 18, 0.97);
+  border: 1px solid #f28c55;
+  box-shadow: 0 20px 70px #0009, 0 0 28px #ff8a4b14;
+  text-align: center;
+}
+
+.studio-shell .welcome-symbol {
+  width: 48px;
+  height: 48px;
+  margin-inline: auto;
+  border-color: #854b32;
+  background: #24150f;
+  color: #ff9863;
+}
+
+.studio-shell .welcome-card h1 {
+  color: #f1f1f2;
+  letter-spacing: -0.045em;
+}
+
+.studio-shell .welcome-card p {
+  color: #989aa2;
+}
+
+.studio-shell .welcome-actions button:first-child,
+.studio-shell .export-button {
+  background: #f28c55;
+  border-color: #ff9a63;
+  color: #17100c;
+  font-weight: 700;
+  box-shadow: 0 5px 18px #f28c5524;
+}
+
+.studio-shell .welcome-actions button:first-child:hover,
+.studio-shell .export-button:hover {
+  background: #ffa16d;
+  border-color: #ffad7f;
+  color: #17100c;
+}
+
+.studio-shell .tool-toggle.selected,
+.studio-shell .tree-row.selected {
+  color: #ffad7f;
+  background: #261710;
+  border-color: #874d32;
+}
+
+.studio-shell .tree-row.selected {
+  box-shadow: inset 2px 0 #f28c55;
+}
+
+.studio-shell button:focus-visible,
+.studio-shell input:focus-visible,
+.studio-shell select:focus-visible {
+  outline: 2px solid #ff9863;
+  outline-offset: 2px;
+}
+
+.studio-shell .native-warning {
+  background: #24160f;
+  border-color: #75452e;
+  color: #d4b8a8;
+}
+
+.studio-shell .native-warning svg,
+.studio-shell .native-warning b {
+  color: #ff9863;
+}
+
+.studio-shell .dialog {
+  background: #14151a;
+  border-color: #454047;
+  box-shadow: 0 24px 80px #000b, 0 0 0 1px #f28c5510;
+}
+
+.studio-shell .export-choice:hover {
+  background: #211711;
+  border-color: #9b5b3a;
+}
+
+.studio-shell .vehicle-part-toggle:hover:not(:disabled) {
+  background: #211711;
+  color: #ffbd98;
+}
+
+.studio-shell .vehicle-part-heading svg,
+.studio-shell .vehicle-parts-heading svg {
+  color: #ff9863;
+}
+
+.studio-shell ::-webkit-scrollbar-thumb {
+  background: #3a3432;
+}
+
+.studio-shell ::-webkit-scrollbar-thumb:hover {
+  background: #76503c;
+}
+
+@media (max-width: 767px) {
+  .studio-shell .welcome-card {
+    padding: 26px 20px 23px;
+  }
+}

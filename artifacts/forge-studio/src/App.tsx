@@ -17,7 +17,14 @@ import './viewport-tools.css';
 import { downloadBlob, expandArchives, exportModel, loadAsset, MAX_FILE_SIZE, validateFiles } from '@/lib/model-io';
 import { getProject, listProjects, saveProject, type LocalProject } from '@/lib/projects';
 import { buildFiveMResourceZip, readResourcePackage, type ResourcePackage, type ResourcePackageFile } from '@/lib/resource-package';
-import { inspectNativeYftExtras, previewNativeYft, type NativeYftExtra } from '@/lib/native-yft-preview';
+import {
+  inspectNativeYftExtras,
+  previewNativeYft,
+  rebuildNativeYft,
+  type NativeYftExtra,
+  type NativeYftMeshEdit,
+  type NativeYftMeshMap,
+} from '@/lib/native-yft-preview';
 
 type Notice = { kind: 'success' | 'error' | 'info'; message: string } | null;
 type Busy = { label: string; progress: number } | null;
@@ -29,6 +36,90 @@ const unsupportedGame = ['YFT', 'YTD', 'YDR', 'YDD', 'YBN', 'YTYP', 'YMAP'];
 
 function normalizeYftStem(path: string) {
   return (path.split('/').pop() || path).replace(/\.yft$/i, '').replace(/_(?:hi|med|low|vlow)$/i, '').toLocaleLowerCase();
+}
+
+function findNativeYftSourceRoot(root: THREE.Object3D): THREE.Object3D | null {
+  let sourceRoot: THREE.Object3D | null = null;
+  root.traverse((node) => {
+    if (node.userData.forgeNativeYftSourceRoot) sourceRoot = node;
+  });
+  return sourceRoot;
+}
+
+function collectNativeYftEdits(sceneRoot: THREE.Object3D, sourceRoot: THREE.Object3D): NativeYftMeshEdit[] {
+  if (sceneRoot.userData.forgeNativeYftAdditionalSceneAssets) {
+    throw new Error('A separate model was added to the scene. Export its edits separately before rebuilding this YFT.');
+  }
+  const unsupportedEdits = sourceRoot.userData.forgeNativeYftUnsupportedEdits as string[] | undefined;
+  if (unsupportedEdits?.length) {
+    throw new Error(`Native YFT export cannot include ${unsupportedEdits[0]}. Use the YTD editor for native texture changes.`);
+  }
+  const meshMap = sourceRoot.userData.forgeNativeYftMeshMap as NativeYftMeshMap[] | undefined;
+  if (!Array.isArray(meshMap) || !meshMap.length) {
+    throw new Error('The preview did not retain native YFT mesh identities, so this scene cannot be rebuilt safely.');
+  }
+
+  sceneRoot.updateMatrixWorld(true);
+  const inverseSourceRoot = sourceRoot.matrixWorld.clone().invert();
+  const nodesByMeshIndex = new Map<number, THREE.Object3D[]>();
+  sourceRoot.traverse((node) => {
+    const meshIndex = node.userData.forgeNativeYftMeshIndex;
+    if (!Number.isInteger(meshIndex)) return;
+    const nodes = nodesByMeshIndex.get(meshIndex) || [];
+    nodes.push(node);
+    nodesByMeshIndex.set(meshIndex, nodes);
+  });
+
+  const edits: NativeYftMeshEdit[] = [];
+  for (const sourceMesh of meshMap) {
+    const nodes = nodesByMeshIndex.get(sourceMesh.meshIndex) || [];
+    if (!nodes.length) {
+      edits.push({ meshIndex: sourceMesh.meshIndex, removed: true });
+      continue;
+    }
+    if (nodes.length !== sourceMesh.nodeCount) {
+      throw new Error(
+        `${sourceMesh.label} is split into multiple native face groups. Keep all groups together; partial deletion or duplication is not supported yet.`,
+      );
+    }
+
+    const matrices = nodes.map((node) => inverseSourceRoot.clone().multiply(node.matrixWorld));
+    const firstMatrix = matrices[0];
+    if (matrices.some((matrix) => matrix.elements.some((value, index) => Math.abs(value - firstMatrix.elements[index]) > 1e-5))) {
+      throw new Error(`${sourceMesh.label} has face groups with different transforms. Apply one transform to the whole native mesh.`);
+    }
+
+    const visibleNodes = nodes.filter((node) => {
+      const parts = node.userData.forgeVehicleParts as Array<{ category?: string }> | undefined;
+      return !parts?.some((part) => part.category === 'extra');
+    });
+    if (visibleNodes.length) {
+      const visibility = new Set(visibleNodes.map((node) => node.visible));
+      if (visibility.size > 1) throw new Error(`${sourceMesh.label} has only some face groups hidden; native export requires the whole mesh.`);
+      if (!visibleNodes[0].visible) {
+        edits.push({ meshIndex: sourceMesh.meshIndex, removed: true });
+        continue;
+      }
+    }
+
+    const elements = firstMatrix.elements;
+    const isIdentity = elements.every((value, index) => Math.abs(value - (index % 5 === 0 ? 1 : 0)) <= 1e-5);
+    if (!isIdentity) edits.push({ meshIndex: sourceMesh.meshIndex, matrix: [...elements], removed: false });
+  }
+  return edits;
+}
+
+function markNativeYftUnsupported(sceneRoot: THREE.Object3D | null, object: THREE.Object3D | null, reason: string) {
+  if (!sceneRoot || !object) return;
+  const sourceRoot = findNativeYftSourceRoot(sceneRoot);
+  if (!sourceRoot) return;
+  let current: THREE.Object3D | null = object;
+  while (current && current !== sourceRoot) current = current.parent;
+  if (current !== sourceRoot) return;
+  const issues = sourceRoot.userData.forgeNativeYftUnsupportedEdits as string[] | undefined;
+  const nextIssues = issues || [];
+  if (!nextIssues.includes(reason)) nextIssues.push(reason);
+  sourceRoot.userData.forgeNativeYftUnsupportedEdits = nextIssues;
 }
 
 function isHighLodYft(path: string) {
@@ -366,7 +457,13 @@ function App() {
     });
     return copy;
   };
-  const walkFiles = async (files: File[], mode: 'append' | 'replace' = 'append', originalFiles = files, preserveResource = false): Promise<boolean> => {
+  const walkFiles = async (
+    files: File[],
+    mode: 'append' | 'replace' = 'append',
+    originalFiles = files,
+    preserveResource = false,
+    nativeYft?: { sourcePath: string; lod: string; meshMap: NativeYftMeshMap[] },
+  ): Promise<boolean> => {
     let progressTimer = 0;
     try {
       const hasZip = files.some((file) => file.name.toLowerCase().endsWith('.zip'));
@@ -381,6 +478,21 @@ function App() {
       const loadedAssets = await Promise.all(modelFiles.map((file) => loadAsset([file, ...importFiles.filter((sidecar) => sidecar !== file)])));
       window.clearInterval(progressTimer);
       setBusy({ label: 'Preparing scene', progress: 92 });
+      if (nativeYft) {
+        const nativeRoot = loadedAssets[0]?.root;
+        if (!nativeRoot) throw new Error('The native YFT preview was missing its scene root.');
+        const nativeNodePattern = /^FFYFTMESH(\d{5})PART\d{3}__(.*)$/;
+        nativeRoot.traverse((node) => {
+          const match = node.name.match(nativeNodePattern);
+          if (!match) return;
+          node.userData.forgeNativeYftMeshIndex = Number(match[1]);
+          node.name = match[2] || `Vehicle mesh ${Number(match[1]) + 1}`;
+        });
+        nativeRoot.userData.forgeNativeYftSourceRoot = true;
+        nativeRoot.userData.forgeNativeYftSourcePath = nativeYft.sourcePath;
+        nativeRoot.userData.forgeNativeYftLod = nativeYft.lod;
+        nativeRoot.userData.forgeNativeYftMeshMap = nativeYft.meshMap;
+      }
        const nextPartStates: Record<string, boolean> = mode === 'replace' || !root ? {} : { ...vehicleInlinePartEnabled };
        loadedAssets.forEach(({ root: assetRoot }) => {
          assetRoot.traverse((node) => {
@@ -397,6 +509,15 @@ function App() {
          });
        });
       const scene = mode === 'replace' || !root ? new THREE.Group() : root;
+      if (mode === 'append' && scene.userData.forgeNativeYftActive) {
+        scene.userData.forgeNativeYftAdditionalSceneAssets = true;
+      }
+      if (nativeYft) {
+        scene.userData.forgeNativeYftActive = true;
+        scene.userData.forgeNativeYftSourcePath = nativeYft.sourcePath;
+      } else if (mode === 'append' && scene.userData.forgeNativeYftActive) {
+        scene.userData.forgeNativeYftAdditionalSceneAssets = true;
+      }
       if (mode === 'replace' || !root) { scene.clear(); hiddenTextures.current.clear(); }
       loadedAssets.forEach((loaded) => scene.add(loaded.root));
        setVehicleInlinePartEnabled(nextPartStates);
@@ -508,6 +629,7 @@ function App() {
        );
       let preview: Awaited<ReturnType<typeof previewNativeYft>> | null = null;
       let selectedModel = modelFile;
+      let selectedModelPath = modelFile.webkitRelativePath || modelFile.name;
       let selectedYtds: File[] = [];
       let lastPreviewError: unknown;
        for (const { candidate } of previewCandidates) {
@@ -526,6 +648,7 @@ function App() {
         try {
           preview = await previewNativeYft(candidate.file, candidateYtds);
           selectedModel = candidate.file;
+          selectedModelPath = candidate.path;
           selectedYtds = candidateYtds;
           break;
         } catch (error) {
@@ -561,7 +684,13 @@ function App() {
         .map((item) => item.file);
       const originalFiles = resource.files.map((item) => item.file);
       const importedCompanions = files.filter((file) => ![modelFile, ...ytdFiles.map((item) => item.file), ...otherModels].includes(file));
-      const loaded = await walkFiles([preview.model, ...otherModels, ...importedCompanions], mode, originalFiles, true);
+      const loaded = await walkFiles(
+        [preview.model, ...otherModels, ...importedCompanions],
+        mode,
+        originalFiles,
+        true,
+        { sourcePath: selectedModelPath, lod: preview.nativeMeshLod, meshMap: preview.nativeMeshMap },
+      );
       if (!loaded) return;
       setVehicleAddonParts(nextAddonParts);
        setVehicleNativeExtras(allNativeExtras);
@@ -595,7 +724,7 @@ function App() {
          : '';
       setNotice({
          kind: preview.textureCount && !inspectionErrors.length ? 'success' : 'info',
-         message: `Loaded ${preview.meshCount} usable YFT meshes; ${textureStatus}.${extraSummary}${skippedMeshes}${unmatched}${omitted}${textureErrors}${shaderSummary}${inspectionSummary} Export a source-preserving resource ZIP for the original YFT and YTD files. Viewport geometry edits export as GLB, not native YFT.`,
+          message: `Loaded ${preview.meshCount} usable YFT meshes; ${textureStatus}.${extraSummary}${skippedMeshes}${unmatched}${omitted}${textureErrors}${shaderSummary}${inspectionSummary} Resource ZIP export can rebuild whole-mesh transforms and hide/delete edits as native YFT across safely matched LOD files. Partial face-group edits and viewport material changes are refused; existing collision and physics are preserved.`,
       });
     } catch (error) {
       setBusy(null);
@@ -634,6 +763,7 @@ function App() {
     const image = new Image();
     image.onload = () => {
       snapshot();
+      markNativeYftUnsupported(root, selected, 'material and texture edits');
       const texture = new THREE.Texture(image);
       texture.colorSpace = THREE.SRGBColorSpace;
       texture.needsUpdate = true;
@@ -651,6 +781,7 @@ function App() {
     if (!standard) return;
     if (selected?.userData.forgeLocked) { setNotice({ kind: 'info', message: 'Unlock this object in the scene tree before editing it.' }); return; }
     snapshot();
+    markNativeYftUnsupported(root, selected, 'material edits');
     if (key === 'color') standard.color.set(value as string);
     else standard[key] = Number(value);
     standard.needsUpdate = true; setSceneRevision((v) => v + 1); setDirty(true);
@@ -759,7 +890,7 @@ function App() {
   const exportResource = async () => {
     if (!resourcePackage) return;
     const safeName = resourcePackage.name.trim().replace(/[^\w.-]+/g, '_') || 'fivem_resource';
-    setBusy({ label: 'Building FiveM resource ZIP', progress: 20 });
+    setBusy({ label: 'Preparing native FiveM resource export', progress: 12 });
     try {
       const extraIds = [...new Set(vehicleNativeExtras
         .map((extra) => Number(extra.id.split(':')[1]))
@@ -767,13 +898,51 @@ function App() {
       const spawnDefaults = vehicleSpawnModelNames.length && extraIds.length
         ? { modelNames: vehicleSpawnModelNames, extraIds }
         : undefined;
-      const blob = await buildFiveMResourceZip(resourcePackage, spawnDefaults);
+      let exportPackage = resourcePackage;
+      let nativeEditMessage = '';
+      const nativeSourceRoot = root ? findNativeYftSourceRoot(root) : null;
+      if (root?.userData.forgeNativeYftActive && !nativeSourceRoot) {
+        throw new Error('The original YFT preview root was removed. Reload the resource before exporting native geometry.');
+      }
+      if (root && nativeSourceRoot) {
+        const edits = collectNativeYftEdits(root, nativeSourceRoot);
+        if (edits.length) {
+          const sourcePath = String(nativeSourceRoot.userData.forgeNativeYftSourcePath || '');
+          const relatedYfts = resourcePackage.files.filter((item) =>
+            item.path.toLowerCase().endsWith('.yft') && normalizeYftStem(item.path) === normalizeYftStem(sourcePath),
+          );
+          if (!relatedYfts.some((item) => item.path.toLowerCase() === sourcePath.toLowerCase())) {
+            throw new Error('The edited source YFT is no longer in this resource package.');
+          }
+          const sourceLod = String(nativeSourceRoot.userData.forgeNativeYftLod || 'unknown');
+          setBusy({ label: `Rebuilding native YFT geometry (${edits.length} edits)`, progress: 34 });
+          const rebuilt = await rebuildNativeYft(
+            relatedYfts.map(({ path, file }) => ({ path, file })),
+            sourcePath,
+            sourceLod,
+            edits,
+          );
+          const rebuiltByPath = new Map(rebuilt.files.map((item) => [item.path.toLowerCase(), item.file]));
+          exportPackage = {
+            ...resourcePackage,
+            files: resourcePackage.files.map((item) => ({
+              ...item,
+              file: rebuiltByPath.get(item.path.toLowerCase()) || item.file,
+            })),
+          };
+          nativeEditMessage = ` Native YFT render geometry rebuilt in ${rebuilt.files.length} matching file${rebuilt.files.length === 1 ? '' : 's'}. ${rebuilt.warnings.join(' ')}`;
+        } else {
+          nativeEditMessage = ' No native geometry changes were detected; original YFT files were retained.';
+        }
+      }
+      setBusy({ label: 'Writing FiveM resource ZIP', progress: 68 });
+      const blob = await buildFiveMResourceZip(exportPackage, spawnDefaults);
       downloadBlob(blob, `${safeName}.zip`);
       setResourceOpen(false);
       setExportOpen(false);
       setNotice({
         kind: 'success',
-        message: `${safeName}.zip downloaded as a FiveM resource package.${spawnDefaults ? ` A generated client script disables extras ${extraIds.join(', ')} by default for ${vehicleSpawnModelNames.join(', ')} vehicles.` : ''}`,
+        message: `${safeName}.zip downloaded as a FiveM resource package.${nativeEditMessage}${spawnDefaults ? ` A generated client script disables extras ${extraIds.join(', ')} by default for ${vehicleSpawnModelNames.join(', ')} vehicles.` : ''}`,
       });
     } catch (error) {
       setNotice({ kind: 'error', message: `Resource export failed: ${error instanceof Error ? error.message : 'unknown error'}` });
@@ -1025,8 +1194,8 @@ function App() {
                 </div>
                 <div className="inspector-section texture-section"><div className="section-title">BASE-COLOR TEXTURE</div>
                   {baseTexture ? <div className="texture-preview"><img src={(baseTexture.image as HTMLImageElement)?.src || ''} alt="Current base-color texture" /><div><b>{(baseTexture.image as HTMLImageElement)?.width || 'Texture'} × {(baseTexture.image as HTMLImageElement)?.height || ''}</b><small>sRGB color map</small></div></div> : <div className="texture-empty">No base-color image assigned</div>}
-                  <div className="texture-actions"><button onClick={() => texturePicker.current?.click()}><ImagePlus size={13} /> {baseTexture ? 'Replace image' : 'Import image'}</button><button onClick={() => { if (baseTexture) { snapshot(); textureRef.current = null; hiddenTextures.current.delete(standard.uuid); standard.map = null; standard.needsUpdate = true; setSceneRevision((v) => v + 1); setDirty(true); } }} disabled={!baseTexture}>Revert</button><button onClick={exportTexture} disabled={!baseTexture}><Download size={13} /> Save image</button></div>
-                  <label className="check-row"><input type="checkbox" checked={textureShown} disabled={!baseTexture} onChange={(e) => { setTextureShown(e.target.checked); if (standard) { if (e.target.checked) { standard.map = hiddenTextures.current.get(standard.uuid) || textureRef.current; hiddenTextures.current.delete(standard.uuid); } else if (standard.map) { hiddenTextures.current.set(standard.uuid, standard.map); textureRef.current = standard.map; standard.map = null; } standard.needsUpdate = true; setSceneRevision((v) => v + 1); setDirty(true); } }} /> Display texture on model</label>
+                  <div className="texture-actions"><button onClick={() => texturePicker.current?.click()}><ImagePlus size={13} /> {baseTexture ? 'Replace image' : 'Import image'}</button><button onClick={() => { if (baseTexture) { snapshot(); markNativeYftUnsupported(root, selected, 'material and texture edits'); textureRef.current = null; hiddenTextures.current.delete(standard.uuid); standard.map = null; standard.needsUpdate = true; setSceneRevision((v) => v + 1); setDirty(true); } }} disabled={!baseTexture}>Revert</button><button onClick={exportTexture} disabled={!baseTexture}><Download size={13} /> Save image</button></div>
+                  <label className="check-row"><input type="checkbox" checked={textureShown} disabled={!baseTexture} onChange={(e) => { markNativeYftUnsupported(root, selected, 'material and texture edits'); setTextureShown(e.target.checked); if (standard) { if (e.target.checked) { standard.map = hiddenTextures.current.get(standard.uuid) || textureRef.current; hiddenTextures.current.delete(standard.uuid); } else if (standard.map) { hiddenTextures.current.set(standard.uuid, standard.map); textureRef.current = standard.map; standard.map = null; } standard.needsUpdate = true; setSceneRevision((v) => v + 1); setDirty(true); } }} /> Display texture on model</label>
                   {baseTexture && <><RangeField label={`Repeat U · ${baseTexture.repeat.x.toFixed(2)}`} value={Math.min(baseTexture.repeat.x / 4, 1)} onChange={(v) => { baseTexture.wrapS = THREE.RepeatWrapping; baseTexture.repeat.x = Math.max(.1, v * 4); baseTexture.needsUpdate = true; setSceneRevision((n) => n + 1); setDirty(true); }} /><RangeField label={`Repeat V · ${baseTexture.repeat.y.toFixed(2)}`} value={Math.min(baseTexture.repeat.y / 4, 1)} onChange={(v) => { baseTexture.wrapT = THREE.RepeatWrapping; baseTexture.repeat.y = Math.max(.1, v * 4); baseTexture.needsUpdate = true; setSceneRevision((n) => n + 1); setDirty(true); }} /><RangeField label={`Offset U · ${baseTexture.offset.x.toFixed(2)}`} value={(baseTexture.offset.x + 1) / 2} onChange={(v) => { baseTexture.offset.x = v * 2 - 1; baseTexture.needsUpdate = true; setSceneRevision((n) => n + 1); setDirty(true); }} /><RangeField label={`Offset V · ${baseTexture.offset.y.toFixed(2)}`} value={(baseTexture.offset.y + 1) / 2} onChange={(v) => { baseTexture.offset.y = v * 2 - 1; baseTexture.needsUpdate = true; setSceneRevision((n) => n + 1); setDirty(true); }} /></>}
                 </div>
                  <div className="data-map-note"><ShieldCheck size={13} /><span>Base color and available normal maps are approximated in the viewport. Other GTA samplers are listed above; original YTD files stay preserved in the resource ZIP.</span></div>
@@ -1036,7 +1205,7 @@ function App() {
       </div>
       <footer className="bottom-note"><span>FORGE STUDIO <i>·</i> BROWSER WORKSHOP</span><span>YFT preview uses a converted GLB; replaced textures are rebuilt into YTD dictionaries.</span><span>V 0.2.0</span></footer>
       {notice && <div className={`notice notice-${notice.kind}`} role="status"><span>{notice.kind === 'success' ? <Check size={14} /> : notice.kind === 'error' ? <X size={14} /> : <CircleHelp size={14} />}</span>{notice.message}<button onClick={() => setNotice(null)} aria-label="Dismiss message"><X size={13} /></button></div>}
-       {exportOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) setExportOpen(false); }}><section className="dialog export-dialog" role="dialog" aria-modal="true" aria-labelledby="export-title"><div className="dialog-header"><div><span className="eyebrow">GENERATE FILE</span><h2 id="export-title">Export {root ? 'scene' : 'resource'}</h2></div><IconButton icon={X} label="Close export" onClick={() => setExportOpen(false)} /></div><p className="dialog-intro">Downloads are generated locally and saved directly to your device.</p>{resourcePackage && <button className="export-choice" onClick={() => void exportResource()}><div className="format-chip">ZIP</div><div><b>{resourcePackage.name} · FiveM resource</b><small>{resourcePackage.files.length} source files · original YFT/YTD files included · texture replacements saved to YTD{resourcePackage.hasManifest ? ' · original manifest preserved' : ' · fxmanifest.lua added on export'}</small></div><ChevronRight size={15} /></button>}{root && <><label className="form-label">Filename<input value={exportName} onChange={(e) => setExportName(e.target.value)} data-testid="input-export-filename" /></label><div className="export-options">{(['glb', 'gltf', 'obj', 'stl'] as const).map((kind) => <button key={kind} className="export-choice" onClick={() => void exportScene(kind)}><div className="format-chip">{kind.toUpperCase()}</div><div><b>{kind === 'glb' ? 'GLB · Single file' : kind === 'gltf' ? 'GLTF · ZIP package' : kind === 'obj' ? 'OBJ + MTL · ZIP' : 'STL · Geometry only'}</b><small>{kind === 'glb' ? 'Binary scene with embedded materials and textures' : kind === 'gltf' ? 'JSON scene packaged with its resources' : kind === 'obj' ? 'Mesh data and a basic material definition' : 'Warning: materials and textures are not included'}</small></div><ChevronRight size={15} /></button>)}</div><div className="native-warning"><ShieldCheck size={14} /><span>Standard 3D exports are <b>not native GTA assets.</b> Specialist tools are needed to convert them. YFT geometry edits remain in the GLB export.</span></div></>}</section></div>}
+       {exportOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) setExportOpen(false); }}><section className="dialog export-dialog" role="dialog" aria-modal="true" aria-labelledby="export-title"><div className="dialog-header"><div><span className="eyebrow">GENERATE FILE</span><h2 id="export-title">Export {root ? 'scene' : 'resource'}</h2></div><IconButton icon={X} label="Close export" onClick={() => setExportOpen(false)} /></div><p className="dialog-intro">Downloads are generated locally and saved directly to your device.</p>{resourcePackage && <button className="export-choice" onClick={() => void exportResource()}><div className="format-chip">ZIP</div><div><b>{resourcePackage.name} · FiveM resource</b><small>{resourcePackage.files.length} source files · edited YFT geometry rebuilt natively when supported · YTD replacements saved in place{resourcePackage.hasManifest ? ' · original manifest preserved' : ' · fxmanifest.lua added on export'}</small></div><ChevronRight size={15} /></button>}{root && <><label className="form-label">Filename<input value={exportName} onChange={(e) => setExportName(e.target.value)} data-testid="input-export-filename" /></label><div className="export-options">{(['glb', 'gltf', 'obj', 'stl'] as const).map((kind) => <button key={kind} className="export-choice" onClick={() => void exportScene(kind)}><div className="format-chip">{kind.toUpperCase()}</div><div><b>{kind === 'glb' ? 'GLB · Single file' : kind === 'gltf' ? 'GLTF · ZIP package' : kind === 'obj' ? 'OBJ + MTL · ZIP' : 'STL · Geometry only'}</b><small>{kind === 'glb' ? 'Binary scene with embedded materials and textures' : kind === 'gltf' ? 'JSON scene packaged with its resources' : kind === 'obj' ? 'Mesh data and a basic material definition' : 'Warning: materials and textures are not included'}</small></div><ChevronRight size={15} /></button>)}</div><div className="native-warning"><ShieldCheck size={14} /><span>Standard 3D exports are <b>not native GTA assets.</b> Native YFT rebuild supports whole-mesh transforms and hide/delete. Partial face-group edits and material changes are not included; existing collision and vehicle physics stay unchanged.</span></div></>}</section></div>}
       {projectOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) setProjectOpen(false); }}><section className="dialog projects-dialog" role="dialog" aria-modal="true" aria-labelledby="projects-title"><div className="dialog-header"><div><span className="eyebrow">THIS BROWSER ONLY</span><h2 id="projects-title">Local projects</h2></div><IconButton icon={X} label="Close projects" onClick={() => setProjectOpen(false)} /></div><p className="dialog-intro">Project data is stored in this browser's local database. It is never uploaded.</p><div className="project-list scrollbar-thin">{projects.length ? projects.map((project) => <button className="project-row" key={project.id} onClick={() => void openLocal(project.id)}><div className="project-file"><Box size={16} /></div><div><b>{project.name}</b><small>Saved {new Date(project.updatedAt).toLocaleString()} · {project.sources.length} source file{project.sources.length === 1 ? '' : 's'}</small></div><ChevronRight size={14} /></button>) : <div className="project-list-empty"><HardDrive size={19} /><b>No saved projects</b><span>Save a scene locally to find it here.</span></div>}</div><div className="dialog-footer"><button className="secondary-action" onClick={() => { setProjectOpen(false); clearScene(); }}><FilePlus2 size={14} /> New project</button><button className="primary-action" onClick={() => setProjectOpen(false)}>Done</button></div></section></div>}
       <ResourcePackageDialog
         open={resourceOpen}

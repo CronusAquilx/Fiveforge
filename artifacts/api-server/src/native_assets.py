@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import base64
+import dataclasses
 import io
 import json
+import math
 import re
 import struct
 import sys
@@ -431,6 +433,96 @@ def decode_binary_preview_bundle(data: bytes) -> dict[str, Any]:
     }
 
 
+def decode_binary_rebuild_bundle(data: bytes) -> dict[str, Any]:
+    if len(data) < 4:
+        raise ValueError("The native YFT edit upload is incomplete.")
+    header_size = struct.unpack(">I", data[:4])[0]
+    if header_size < 2 or header_size > 1024 * 1024 or 4 + header_size > len(data):
+        raise ValueError("The native YFT edit upload has an invalid file index.")
+    try:
+        manifest = json.loads(data[4:4 + header_size].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("The native YFT edit upload has an invalid file index.") from error
+    files = manifest.get("files") if isinstance(manifest, dict) else None
+    edits = manifest.get("edits") if isinstance(manifest, dict) else None
+    source_path = manifest.get("sourcePath") if isinstance(manifest, dict) else None
+    source_lod = manifest.get("sourceLod") if isinstance(manifest, dict) else None
+    if not isinstance(files, list) or not 1 <= len(files) <= 24:
+        raise ValueError("Choose one or more related YFT files, up to 24.")
+    if not isinstance(source_path, str) or not source_path:
+        raise ValueError("The edited source YFT is missing from this export.")
+    if not isinstance(source_lod, str) or source_lod not in {"high", "med", "low", "vlow"}:
+        raise ValueError("The previewed YFT LOD is invalid.")
+    if not isinstance(edits, list) or not 1 <= len(edits) <= 600:
+        raise ValueError("No supported native geometry edits were supplied.")
+
+    offset = 4 + header_size
+    total_size = 0
+    models: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    for item in files:
+        if not isinstance(item, dict):
+            raise ValueError("The native YFT edit upload contains an invalid file entry.")
+        name = str(item.get("name") or "")
+        role = item.get("role")
+        size = item.get("size")
+        normalized_path = name.replace("\\", "/").casefold()
+        if (
+            role != "model"
+            or not name.lower().endswith(".yft")
+            or not normalized_path
+            or normalized_path in seen_paths
+            or not isinstance(size, int)
+            or size < 1
+            or size > MAX_FILE_BYTES
+            or offset + size > len(data)
+        ):
+            raise ValueError("The native YFT edit upload contains an invalid or oversized YFT file.")
+        seen_paths.add(normalized_path)
+        models.append({"name": name, "data": data[offset:offset + size]})
+        offset += size
+        total_size += size
+    if offset != len(data):
+        raise ValueError("The native YFT edit upload contains unexpected trailing data.")
+    if total_size > MAX_FILE_BYTES:
+        raise ValueError("The related YFT files exceed the 250 MB native edit limit.")
+    if not any(item["name"].replace("\\", "/").casefold() == source_path.replace("\\", "/").casefold() for item in models):
+        raise ValueError("The edited source YFT is not included in this export.")
+
+    validated_edits: list[dict[str, Any]] = []
+    seen_indices: set[int] = set()
+    for item in edits:
+        if not isinstance(item, dict):
+            raise ValueError("The native geometry edit list contains an invalid entry.")
+        mesh_index = item.get("meshIndex")
+        matrix = item.get("matrix")
+        removed = item.get("removed", False)
+        if (
+            not isinstance(mesh_index, int)
+            or mesh_index < 0
+            or mesh_index in seen_indices
+            or not isinstance(removed, bool)
+            or (not removed and (
+                not isinstance(matrix, list)
+                or len(matrix) != 16
+                or any(not isinstance(value, (int, float)) or not math.isfinite(value) for value in matrix)
+            ))
+        ):
+            raise ValueError("The native geometry edit list contains an invalid transform or mesh index.")
+        seen_indices.add(mesh_index)
+        validated_edits.append({
+            "meshIndex": mesh_index,
+            "matrix": [float(value) for value in matrix] if not removed else None,
+            "removed": removed,
+        })
+    return {
+        "sourcePath": source_path,
+        "sourceLod": source_lod,
+        "edits": validated_edits,
+        "models": models,
+    }
+
+
 def decode_base64(value: Any, label: str) -> bytes:
     if not isinstance(value, str) or not value:
         raise ValueError(f"{label} is missing.")
@@ -564,6 +656,7 @@ def preview_yft(payload: dict[str, Any]) -> dict[str, Any]:
 
     asset = Yft.from_bytes(model_data, path=str(payload.get("fileName") or "vehicle.yft"))
     meshes = []
+    selected_lod: str | None = None
     for lod in ("high", "med", "low", "vlow"):
         try:
             candidate = asset.meshes(lod=lod)
@@ -575,6 +668,7 @@ def preview_yft(payload: dict[str, Any]) -> dict[str, Any]:
             for mesh in candidate
         ):
             meshes = candidate
+            selected_lod = lod
             break
     if not meshes:
         try:
@@ -652,6 +746,7 @@ def preview_yft(payload: dict[str, Any]) -> dict[str, Any]:
     skipped = 0
     mesh_names: dict[str, int] = {}
     mesh_extra_ids: set[str] = set()
+    native_mesh_map: dict[int, dict[str, Any]] = {}
 
     def find_texture(name: str) -> Image.Image | None:
         leaf_name = name.replace("\\", "/").rsplit("/", 1)[-1].strip()
@@ -757,7 +852,11 @@ def preview_yft(payload: dict[str, Any]) -> dict[str, Any]:
             material_names.add(shader_name)
 
         source_name = str(getattr(source, "name", "") or "")
-        if not source_name or re.fullmatch(r"(?:mesh|object|geometry|primitive|shape)(?:[._\s-]*\d+)?", source_name.strip(), re.IGNORECASE):
+        if not source_name or re.fullmatch(
+            r"(?:mesh|object|geometry|primitive|shape|material)(?:[._\s-]*\d+)?",
+            source_name.strip(),
+            re.IGNORECASE,
+        ):
             source_name = dominant_bone_name(source, skeleton)
         name = display_mesh_name(
             source_name,
@@ -779,7 +878,7 @@ def preview_yft(payload: dict[str, Any]) -> dict[str, Any]:
                 face_groups = {named_extra["id"]: np.arange(len(mesh.faces), dtype=np.int64)}
         base_name = f"Vehicle part {index + 1:02d}" if extra_part_from_name(name) else name
         nonempty_groups = [(part_id, face_indices) for part_id, face_indices in face_groups.items() if len(face_indices)]
-        for part_id, face_indices in nonempty_groups:
+        for part_index, (part_id, face_indices) in enumerate(nonempty_groups):
             if part_id is None and len(nonempty_groups) == 1:
                 part_mesh = mesh
                 part_name = base_name
@@ -795,7 +894,13 @@ def preview_yft(payload: dict[str, Any]) -> dict[str, Any]:
                         continue
                     mesh_extra_ids.add(part_id)
                     part_name = f"{name} · {part['label']}"
-            scene.add_geometry(part_mesh, geom_name=part_name, node_name=part_name)
+            node_name = f"FFYFTMESH{index:05d}PART{part_index:03d}__{part_name}"
+            scene.add_geometry(part_mesh, geom_name=part_name, node_name=node_name)
+            entry = native_mesh_map.setdefault(
+                index,
+                {"meshIndex": index, "label": name, "nodeCount": 0},
+            )
+            entry["nodeCount"] += 1
 
     if not scene.geometry:
         raise ValueError("No usable render meshes were found in this YFT.")
@@ -814,6 +919,8 @@ def preview_yft(payload: dict[str, Any]) -> dict[str, Any]:
         "gtaShaders": sorted(material_names),
         "extras": vehicle_extra_parts(drawables),
         "meshExtras": sorted(mesh_extra_ids, key=lambda id: extra_sort_key({"id": id, "label": id})),
+        "nativeMeshLod": selected_lod or "unknown",
+        "nativeMeshMap": [native_mesh_map[index] for index in sorted(native_mesh_map)],
     }
 
 
@@ -827,13 +934,319 @@ def inspect_yft_extras(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _yft_meshes_for_lod(asset: Yft, preferred_lod: str) -> tuple[str, list[Any]]:
+    for lod in (preferred_lod, "high", "med", "low", "vlow"):
+        if lod not in {"high", "med", "low", "vlow"}:
+            continue
+        try:
+            meshes = list(asset.meshes(lod=lod))
+        except Exception:
+            continue
+        if meshes:
+            return lod, meshes
+    raise ValueError("A related YFT file has no supported render LOD.")
+
+
+def _yft_skeleton(asset: Yft) -> Any:
+    return next(
+        (
+            item.drawable.skeleton
+            for item in asset.iter_drawables()
+            if getattr(item.drawable, "skeleton", None)
+        ),
+        None,
+    )
+
+
+def _yft_mesh_signature(mesh: Any, skeleton: Any) -> dict[str, Any]:
+    positions = list(getattr(mesh, "positions", None) or [])
+    if not positions:
+        return {"bone": "", "center": (0.0, 0.0, 0.0), "extent": (0.0, 0.0, 0.0), "shader": "", "textures": ()}
+    minimum = tuple(min(float(getattr(point, axis)) for point in positions) for axis in "xyz")
+    maximum = tuple(max(float(getattr(point, axis)) for point in positions) for axis in "xyz")
+    center = tuple((minimum[index] + maximum[index]) / 2.0 for index in range(3))
+    extent = tuple(maximum[index] - minimum[index] for index in range(3))
+    material = getattr(mesh, "material", None)
+    textures = mesh_texture_slots(material)
+    return {
+        "bone": dominant_bone_name(mesh, skeleton).casefold(),
+        "center": center,
+        "extent": extent,
+        "shader": str(
+            getattr(material, "shader_name", None)
+            or getattr(material, "resolved_shader_file_name", None)
+            or ""
+        ).casefold(),
+        "textures": tuple(sorted((str(key).casefold(), texture_key(str(value))) for key, value in textures.items() if value)),
+    }
+
+
+def _mesh_signature_cost(left: dict[str, Any], right: dict[str, Any]) -> float | None:
+    if not left["bone"] or left["bone"] != right["bone"]:
+        return None
+    import numpy as np
+
+    center_distance = float(np.linalg.norm(np.asarray(left["center"]) - np.asarray(right["center"])))
+    extent_distance = float(np.linalg.norm(np.asarray(left["extent"]) - np.asarray(right["extent"])))
+    texture_penalty = 0.0 if left["textures"] == right["textures"] else 0.15
+    shader_penalty = 0.0 if left["shader"] == right["shader"] else 0.4
+    return center_distance + 0.25 * extent_distance + texture_penalty + shader_penalty
+
+
+def _paired_mesh_index(
+    source_index: int,
+    source_signatures: list[dict[str, Any]],
+    target_signatures: list[dict[str, Any]],
+    target_label: str,
+) -> int:
+    if source_index < 0 or source_index >= len(source_signatures):
+        raise ValueError(f"Edited YFT mesh {source_index} is outside the previewed source mesh list.")
+    source_signature = source_signatures[source_index]
+    target_candidates = sorted(
+        (
+            (cost, index)
+            for index, signature in enumerate(target_signatures)
+            if (cost := _mesh_signature_cost(source_signature, signature)) is not None
+        ),
+        key=lambda item: item[0],
+    )
+    if not target_candidates:
+        raise ValueError(
+            f"Could not safely match edited mesh {source_index + 1} to {target_label}; "
+            "the native export was stopped to avoid a mismatched LOD."
+        )
+    best_cost, target_index = target_candidates[0]
+    target_margin = target_candidates[1][0] - best_cost if len(target_candidates) > 1 else float("inf")
+    reverse_candidates = sorted(
+        (
+            (cost, index)
+            for index, signature in enumerate(source_signatures)
+            if (cost := _mesh_signature_cost(signature, target_signatures[target_index])) is not None
+        ),
+        key=lambda item: item[0],
+    )
+    reverse_margin = (
+        reverse_candidates[1][0] - reverse_candidates[0][0]
+        if len(reverse_candidates) > 1
+        else float("inf")
+    )
+    if (
+        best_cost >= 0.45
+        or target_margin <= 0.05
+        or not reverse_candidates
+        or reverse_candidates[0][1] != source_index
+        or reverse_margin <= 0.05
+    ):
+        raise ValueError(
+            f"Could not uniquely match edited mesh {source_index + 1} to {target_label}; "
+            "the native export was stopped to avoid a mismatched LOD."
+        )
+    return target_index
+
+
+def _apply_yft_transform(mesh: Any, column_major_matrix: list[float]) -> None:
+    import numpy as np
+
+    if len(column_major_matrix) != 16:
+        raise ValueError("A native mesh transform must contain 16 matrix values.")
+    preview_matrix = np.asarray(column_major_matrix, dtype=np.float64).reshape((4, 4), order="F")
+    if not np.isfinite(preview_matrix).all() or not np.allclose(preview_matrix[3], (0, 0, 0, 1), atol=1e-6):
+        raise ValueError("Perspective transforms cannot be written to native YFT meshes.")
+    coordinate_conversion = np.asarray(
+        (
+            (1.0, 0.0, 0.0, 0.0),
+            (0.0, 0.0, 1.0, 0.0),
+            (0.0, -1.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0, 1.0),
+        ),
+        dtype=np.float64,
+    )
+    native_matrix = coordinate_conversion.T @ preview_matrix @ coordinate_conversion
+    linear = native_matrix[:3, :3]
+    determinant = float(np.linalg.det(linear))
+    if abs(determinant) < 1e-8:
+        raise ValueError("A zero-scale native mesh transform cannot be exported.")
+
+    positions = list(getattr(mesh, "positions", None) or [])
+    if not positions:
+        raise ValueError("A native YFT mesh has no editable vertex positions.")
+    source_positions = np.asarray([(point.x, point.y, point.z) for point in positions], dtype=np.float64)
+    homogeneous = np.column_stack((source_positions, np.ones(len(source_positions), dtype=np.float64)))
+    transformed = homogeneous @ native_matrix.T
+    mesh.positions = [
+        type(point)(float(value[0]), float(value[1]), float(value[2]))
+        for point, value in zip(positions, transformed)
+    ]
+
+    normal_matrix = np.linalg.inv(linear).T
+    for attribute in ("normals", "tangents"):
+        values = list(getattr(mesh, attribute, None) or [])
+        if not values:
+            continue
+        if len(values) != len(positions):
+            raise ValueError(f"The native mesh has an incompatible {attribute} buffer; its edit was not exported.")
+        directions = np.asarray([(value.x, value.y, value.z) for value in values], dtype=np.float64)
+        transformed_directions = directions @ normal_matrix.T
+        lengths = np.linalg.norm(transformed_directions, axis=1)
+        nonzero = lengths > 1e-12
+        transformed_directions[nonzero] /= lengths[nonzero, None]
+        updated = []
+        for value, direction in zip(values, transformed_directions):
+            components = [float(direction[0]), float(direction[1]), float(direction[2])]
+            if hasattr(value, "w"):
+                handedness = float(value.w) * (-1.0 if determinant < 0 else 1.0)
+                updated.append(type(value)(*components, handedness))
+            else:
+                updated.append(type(value)(*components))
+        setattr(mesh, attribute, updated)
+
+    if determinant < 0:
+        indices = list(getattr(mesh, "indices", None) or [])
+        if len(indices) % 3:
+            raise ValueError("A mirrored YFT mesh has an unsupported index layout.")
+        for index in range(0, len(indices), 3):
+            indices[index + 1], indices[index + 2] = indices[index + 2], indices[index + 1]
+        mesh.indices = indices
+
+
+def _remove_yft_mesh(asset: Yft, lod: str, target_mesh: Any) -> None:
+    for drawable in asset.iter_drawables():
+        models = getattr(drawable.drawable, "lods", {}).get(lod, [])
+        for model in models:
+            meshes = getattr(model, "meshes", None)
+            if isinstance(meshes, list) and any(mesh is target_mesh for mesh in meshes):
+                meshes[:] = [mesh for mesh in meshes if mesh is not target_mesh]
+                return
+    raise ValueError("Could not safely remove a selected mesh from the native YFT.")
+
+
+def _writer_shader_library(assets: list[Yft]) -> Any:
+    from fivefury import load_shader_library
+
+    matrix_counts: dict[tuple[str, str], int] = {}
+    for asset in assets:
+        for drawable in asset.iter_drawables():
+            for material in getattr(drawable.drawable, "materials", []) or []:
+                shader_name = str(getattr(material, "shader_name", "") or "").casefold()
+                for parameter in getattr(material, "parameters", []) or []:
+                    if (
+                        str(getattr(parameter, "type_name", "") or "").casefold() == "float4x4"
+                        and isinstance(getattr(parameter, "value", None), (tuple, list))
+                        and len(parameter.value) == 4
+                    ):
+                        matrix_counts[(shader_name, str(parameter.name).casefold())] = 4
+    library = load_shader_library()
+    shaders = []
+    for shader in library.shaders:
+        parameters = tuple(
+            dataclasses.replace(
+                parameter,
+                count=matrix_counts.get((shader.name.casefold(), parameter.name.casefold()), parameter.count),
+            )
+            for parameter in shader.parameters
+        )
+        shaders.append(dataclasses.replace(shader, parameters=parameters) if parameters != shader.parameters else shader)
+    return type(library)(tuple(shaders))
+
+
+def rebuild_yft_binary(payload: dict[str, Any]) -> dict[str, Any]:
+    from fivefury import build_yft_bytes
+
+    source_path = str(payload["sourcePath"])
+    source_key = source_path.replace("\\", "/").casefold()
+    source_lod = str(payload["sourceLod"])
+    edits = list(payload["edits"])
+    models = list(payload["models"])
+    parsed: list[dict[str, Any]] = []
+    for item in models:
+        asset = Yft.from_bytes(item["data"], path=item["name"])
+        parsed.append({"name": item["name"], "data": item["data"], "asset": asset})
+    source_entry = next(
+        item for item in parsed
+        if item["name"].replace("\\", "/").casefold() == source_key
+    )
+    _, source_meshes = _yft_meshes_for_lod(source_entry["asset"], source_lod)
+    source_signatures = [
+        _yft_mesh_signature(mesh, _yft_skeleton(source_entry["asset"]))
+        for mesh in source_meshes
+    ]
+    output_files: list[tuple[str, bytes]] = []
+
+    for item in parsed:
+        asset = item["asset"]
+        is_source = item is source_entry
+        target_lod, target_meshes = _yft_meshes_for_lod(asset, source_lod)
+        target_skeleton = _yft_skeleton(asset)
+        if not is_source:
+            target_signatures = [
+                _yft_mesh_signature(mesh, target_skeleton)
+                for mesh in target_meshes
+            ]
+        else:
+            target_signatures = source_signatures
+        mapped_edits: list[tuple[int, dict[str, Any]]] = []
+        claimed_meshes: set[int] = set()
+        for edit in edits:
+            source_index = int(edit["meshIndex"])
+            if is_source:
+                target_index = source_index
+                if target_index >= len(target_meshes):
+                    raise ValueError(f"Edited YFT mesh {source_index + 1} is missing from {item['name']}.")
+            else:
+                target_index = _paired_mesh_index(
+                    source_index,
+                    source_signatures,
+                    target_signatures,
+                    item["name"],
+                )
+            if target_index in claimed_meshes:
+                raise ValueError(f"Two edited meshes mapped to one part in {item['name']}; export stopped.")
+            claimed_meshes.add(target_index)
+            mapped_edits.append((target_index, edit))
+
+        removed_meshes = 0
+        for target_index, edit in mapped_edits:
+            target_mesh = target_meshes[target_index]
+            if edit["removed"]:
+                _remove_yft_mesh(asset, target_lod, target_mesh)
+                removed_meshes += 1
+            else:
+                _apply_yft_transform(target_mesh, edit["matrix"])
+        if not list(asset.meshes(lod=target_lod)):
+            raise ValueError(f"Removing the selected meshes would leave {item['name']} without render geometry.")
+
+        shader_library = _writer_shader_library([asset])
+        try:
+            rebuilt = build_yft_bytes(asset, shader_library=shader_library)
+        except Exception as error:
+            raise ValueError(f"Could not rebuild {item['name']} as native YFT: {error}") from error
+        roundtrip = Yft.from_bytes(rebuilt, path=item["name"])
+        report = roundtrip.validate()
+        if getattr(report, "errors", []):
+            raise ValueError(
+                f"The rebuilt YFT failed binary validation: {item['name']} "
+                f"({len(report.errors)} error(s))."
+            )
+        output_files.append((item["name"], rebuilt))
+
+    metadata = {
+        "sourcePath": source_path,
+        "files": [{"path": name, "size": len(data)} for name, data in output_files],
+        "editsApplied": len(edits),
+        "warnings": ["Render geometry was rebuilt; original vehicle collision and physics data were preserved."],
+    }
+    return {"metadata": metadata, "fileData": b"".join(data for _, data in output_files)}
+
+
 def main() -> None:
     operation = sys.argv[1] if len(sys.argv) > 1 else ""
     try:
-        payload = decode_binary_preview_bundle(sys.stdin.buffer.read()) if operation in {
-            "preview-yft-binary",
-            "inspect-yft-extras-binary",
-        } else json.load(sys.stdin)
+        if operation == "rebuild-yft-binary":
+            payload = decode_binary_rebuild_bundle(sys.stdin.buffer.read())
+        elif operation in {"preview-yft-binary", "inspect-yft-extras-binary"}:
+            payload = decode_binary_preview_bundle(sys.stdin.buffer.read())
+        else:
+            payload = json.load(sys.stdin)
         if not isinstance(payload, dict):
             raise ValueError("Request body must be an object.")
         if operation == "decode-ytd":
@@ -849,6 +1262,13 @@ def main() -> None:
                     list(Yft.from_bytes(payload["modelData"], path=payload["fileName"]).iter_drawables())
                 ),
             }
+        elif operation == "rebuild-yft-binary":
+            result = rebuild_yft_binary(payload)
+            metadata = json.dumps(result["metadata"], separators=(",", ":")).encode("utf-8")
+            sys.stdout.buffer.write(struct.pack(">I", len(metadata)))
+            sys.stdout.buffer.write(metadata)
+            sys.stdout.buffer.write(result["fileData"])
+            return
         elif operation in {"preview-yft", "preview-yft-binary"}:
             result = preview_yft(payload)
             glb = result.pop("modelGlb")
