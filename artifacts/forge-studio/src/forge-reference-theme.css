@@ -38,6 +38,16 @@ body,
   color: #f4f3f1;
 }
 
+.studio-shell .forge-mark {
+  border-color: #854b32;
+}
+
+.studio-shell .forge-mark::before,
+.studio-shell .forge-mark::after,
+.studio-shell .forge-mark span {
+  background: #ff9863;
+}
+
 .studio-shell .brand-name small,
 .studio-shell .local-tag,
 .studio-shell .toolbar-caption {
@@ -52,6 +62,18 @@ body,
 .studio-shell .right-rail {
   background: #111217;
   border-color: #282a30;
+}
+
+.studio-shell .panel-heading svg,
+.studio-shell .native-kicker,
+.studio-shell .section-title svg,
+.studio-shell .format-chip {
+  color: #ff9863;
+}
+
+.studio-shell .format-chip {
+  border-color: #75452e;
+  background: #24160f;
 }
 
 .studio-shell .viewport-column {
@@ -81,6 +103,7 @@ body,
   z-index: 2;
   inset: 4px;
   border: 1px solid #f28c55;
+  border-radius: 13px;
   box-shadow: inset 0 0 24px #ff8a4b12, 0 0 18px #ff8a4b0c;
   pointer-events: none;
 }
@@ -90,7 +113,8 @@ body,
   padding: 34px 32px 28px;
   background: rgba(13, 14, 18, 0.97);
   border: 1px solid #f28c55;
-  box-shadow: 0 20px 70px #0009, 0 0 28px #ff8a4b14;
+  border-radius: 12px;
+  box-shadow: 0 20px 70px #0009, 0 0 28px #ff8a4b18;
   text-align: center;
 }
 
@@ -126,6 +150,52 @@ body,
   background: #ffa16d;
   border-color: #ffad7f;
   color: #17100c;
+}
+
+.studio-shell .welcome-actions button,
+.studio-shell .toolbar-button,
+.studio-shell .export-choice {
+  border-radius: 6px;
+}
+
+.studio-shell .welcome-native-note {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 7px;
+  max-width: 330px;
+  margin: 14px auto 0;
+  color: #a6a1a0;
+  font-size: 9px;
+  line-height: 1.55;
+}
+
+.studio-shell .welcome-native-note svg {
+  flex: none;
+  margin-top: 1px;
+  color: #ff9863;
+}
+
+.studio-shell .rp-mark {
+  color: #ff9863;
+  border-color: #75452e;
+  background: #24160f;
+}
+
+.studio-shell .rp-kicker,
+.studio-shell .rp-pill.good {
+  color: #ff9863;
+}
+
+.studio-shell .rp-button.export {
+  color: #17100c;
+  background: #f28c55;
+  border-color: #ff9a63;
+}
+
+.studio-shell .rp-button.export:hover {
+  background: #ffa16d;
+  border-color: #ffad7f;
 }
 
 .studio-shell .tool-toggle.selected,

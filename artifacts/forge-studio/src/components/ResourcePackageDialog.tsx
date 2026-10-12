@@ -204,7 +204,7 @@ export default function ResourcePackageDialog({
 
               <div className="rp-native-note">
                 <ShieldCheck size={14} />
-                <span><b>YFT vehicle previews and YTD texture replacement are available</b> from the texture studio. YFT previews open in the regular editor and export as GLB; the native YFT and other original files stay intact in the exported resource.</span>
+                <span><b>YFT vehicle previews, native geometry rebuilds, and YTD texture replacement are available.</b> Whole-mesh transforms and hide/delete edits are written into matching YFT files when you export the resource ZIP. GLB exports are separate previews; unsupported edits are refused rather than silently dropped.</span>
               </div>
             </>
           )}

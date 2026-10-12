@@ -164,7 +164,7 @@ export default function NativeTextureStudioDialog({ resource, onClose, onReplace
         : previewYtds.length
           ? 'no YTD texture names matched the model'
           : 'no matching YTD was available';
-      setSuccess(`Showing ${preview.meshCount} YFT meshes; ${textureStatus}. Use the resource ZIP export to keep YFTs and rebuilt YTDs together. Viewport geometry edits export as GLB.`);
+      setSuccess(`Showing ${preview.meshCount} YFT meshes; ${textureStatus}. Supported whole-mesh transforms and hide/delete edits rebuild into native YFT files in the resource ZIP. GLB remains a separate preview/interchange export.`);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not preview this YFT.');
     } finally {

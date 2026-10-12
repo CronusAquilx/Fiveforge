@@ -1,7 +1,7 @@
 kind = "web"
 previewPath = "/"
 title = "Forge Studio"
-description = "A local-first 3D asset workshop for FiveM creators and GTA V modders. Import supported 3D models and textures, inspect and edit them in a real browser-based viewport, save projects locally, and export standard 3D formats without claiming native GTA asset conversion."
+description = "A local-first 3D editor for FiveM creators. Preview YFT vehicles and YTD textures, apply supported whole-mesh transforms and hide/delete edits, and rebuild matching YFTs into resource ZIP exports; standard 3D formats remain available for interchange."
 version = "1.0.0"
 id = "artifacts/forge-studio"
 router = "path"
