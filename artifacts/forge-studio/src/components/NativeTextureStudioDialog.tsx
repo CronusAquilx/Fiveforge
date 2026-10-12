@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Download, ImagePlus, LoaderCircle, RefreshCw, X } from 'lucide-react';
 import type { ResourcePackage } from '@/lib/resource-package';
+import { previewNativeYft } from '@/lib/native-yft-preview';
 
 type NativeTexture = {
   name: string;
@@ -140,45 +141,13 @@ export default function NativeTextureStudioDialog({ resource, onClose, onReplace
 
   const previewVehicle = async () => {
     if (!selectedYft) return;
-    const dictionaries = ytdFiles.map((item) => item.file);
-    const totalBytes = selectedYft.file.size + dictionaries.reduce((sum, file) => sum + file.size, 0);
-    if (totalBytes > MAX_NATIVE_UPLOAD) {
-      setError('The selected YFT and matching YTD files exceed the 250 MB preview limit.');
-      return;
-    }
     setBusy('Preparing 3D vehicle preview');
     setError('');
     setSuccess('');
     try {
-      const [modelBase64, textureDictionaries] = await Promise.all([
-        toBase64(selectedYft.file),
-        Promise.all(ytdFiles.map(async (item) => ({
-          name: item.path,
-          dataBase64: await toBase64(item.file),
-        }))),
-      ]);
-      const response = await fetch('/api/native-assets/preview-yft', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          fileName: selectedYft.path,
-          modelBase64,
-          textureDictionaries,
-        }),
-      });
-      const data = await readResponse<{
-        modelBase64: string;
-        meshCount: number;
-        textureCount: number;
-        usedTextures: string[];
-      }>(response);
-      const name = selectedYft.file.name.replace(/\.[^.]+$/, '') || 'vehicle';
-      await onPreviewModel(new File(
-        [fromBase64(data.modelBase64)],
-        `${name}-preview.glb`,
-        { type: 'model/gltf-binary' },
-      ));
-      setSuccess(`Showing ${data.meshCount} YFT meshes${data.textureCount ? ` with ${data.textureCount} matched textures` : ''}.`);
+      const preview = await previewNativeYft(selectedYft.file, ytdFiles.map((item) => item.file));
+      await onPreviewModel(preview.model);
+      setSuccess(`Showing ${preview.meshCount} YFT meshes${preview.textureCount ? ` with ${preview.textureCount} matched textures` : ''} in the regular editor. The preview can be edited and exported as GLB; the native YFT stays unchanged.`);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not preview this YFT.');
     } finally {
@@ -262,7 +231,7 @@ export default function NativeTextureStudioDialog({ resource, onClose, onReplace
           {!loadingTextures && ytdFiles.length === 0 && (
             <div className="nt-empty">No YTD texture dictionary is included in this resource. Add its matching YTD to preview or replace vehicle textures.</div>
           )}
-          {yftFiles.length > 0 && <p className="nt-note">YFT preview loads the vehicle mesh into the main viewport. Replacing a texture rebuilds the selected YTD in the resource package; the YFT file remains unchanged.</p>}
+          {yftFiles.length > 0 && <p className="nt-note">YFT preview loads into the regular editor, where you can adjust objects and materials and export a standard GLB. Replacing a texture rebuilds the selected YTD in this resource; edits to the preview do not rebuild the native YFT.</p>}
           <p className="nt-note">Native files are sent to this app’s parser in memory for preview or rebuilding, then discarded. They are not saved by the API.</p>
           {error && <div className="nt-message error" role="alert">{error}</div>}
           {success && <div className="nt-message success" role="status">{success}</div>}

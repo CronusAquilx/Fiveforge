@@ -204,7 +204,7 @@ export default function ResourcePackageDialog({
 
               <div className="rp-native-note">
                 <ShieldCheck size={14} />
-                <span><b>YFT vehicle previews and YTD texture replacement are available</b> from the texture studio. Other native files stay intact in the exported resource.</span>
+                <span><b>YFT vehicle previews and YTD texture replacement are available</b> from the texture studio. YFT previews open in the regular editor and export as GLB; the native YFT and other original files stay intact in the exported resource.</span>
               </div>
             </>
           )}

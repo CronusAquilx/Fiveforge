@@ -14,6 +14,7 @@ import './native-texture-studio.css';
 import { downloadBlob, expandArchives, exportModel, loadAsset, MAX_FILE_SIZE, validateFiles } from '@/lib/model-io';
 import { getProject, listProjects, saveProject, type LocalProject } from '@/lib/projects';
 import { buildFiveMResourceZip, readResourcePackage, type ResourcePackage } from '@/lib/resource-package';
+import { previewNativeYft } from '@/lib/native-yft-preview';
 
 type Notice = { kind: 'success' | 'error' | 'info'; message: string } | null;
 type Busy = { label: string; progress: number } | null;
@@ -187,7 +188,7 @@ function App() {
     });
     return copy;
   };
-  const walkFiles = async (files: File[], mode: 'append' | 'replace' = 'append'): Promise<boolean> => {
+  const walkFiles = async (files: File[], mode: 'append' | 'replace' = 'append', originalFiles = files): Promise<boolean> => {
     let progressTimer = 0;
     try {
       const hasZip = files.some((file) => file.name.toLowerCase().endsWith('.zip'));
@@ -208,7 +209,7 @@ function App() {
       const firstAsset = loadedAssets[0];
       scene.name = mode === 'replace' || !root ? firstAsset.name : scene.name;
       setRoot(scene); setSceneRevision((v) => v + 1); setSelection(firstAsset.root); setFormat(loadedAssets.map((item) => item.format).join(' + '));
-      setSourceFiles((existing) => mode === 'replace' ? files : [...existing, ...files]);
+       setSourceFiles((existing) => mode === 'replace' ? originalFiles : [...existing, ...originalFiles]);
       setProjectName(mode === 'replace' || !root ? firstAsset.name : projectName);
       setDirty(true); history.current = []; future.current = [];
       const importedMeshes = loadedAssets.reduce((count, item) => count + meshStats(item.root).meshes, 0);
@@ -241,6 +242,15 @@ function App() {
     const nativeExtensions = ['yft', 'ytd', 'ydr', 'ydd', 'ybn', 'ytyp', 'ymap', 'ymf', 'ycd', 'ymt', 'yld', 'ypt', 'meta'];
     const pickedExtensions = list.map((file) => file.name.split('.').pop()?.toLowerCase() || '');
     const hasResourceManifest = list.some((file) => ['fxmanifest.lua', '__resource.lua'].includes(file.name.split('/').pop()?.toLowerCase() || ''));
+    const yftFiles = list.filter((file) => file.name.toLowerCase().endsWith('.yft'));
+    const yftCompanions = new Set(['yft', 'ytd', 'glb', 'gltf', 'obj', 'stl', 'mtl', 'bin', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp']);
+    if (!list.some((file) => file.name.toLowerCase().endsWith('.zip')) &&
+        yftFiles.length === 1 &&
+        !hasResourceManifest &&
+        pickedExtensions.every((ext) => yftCompanions.has(ext))) {
+      void loadYftIntoScene(list, yftFiles[0], mode);
+      return;
+    }
     if (!list.some((file) => file.name.toLowerCase().endsWith('.zip')) &&
         (pickedExtensions.some((ext) => nativeExtensions.includes(ext)) || hasResourceManifest) &&
         !pickedExtensions.some((ext) => ['glb', 'gltf', 'obj', 'stl'].includes(ext))) {
@@ -248,6 +258,24 @@ function App() {
       return;
     }
     void walkFiles(list, mode);
+  };
+  const loadYftIntoScene = async (files: File[], modelFile: File, mode: 'append' | 'replace') => {
+    setBusy({ label: `Converting ${modelFile.name} for the viewport`, progress: 12 });
+    try {
+      const ytdFiles = files.filter((file) => file.name.toLowerCase().endsWith('.ytd'));
+      const preview = await previewNativeYft(modelFile, ytdFiles);
+      const otherModels = files.filter((file) => ['glb', 'gltf', 'obj', 'stl'].includes(file.name.split('.').pop()?.toLowerCase() || ''));
+      const loaded = await walkFiles([preview.model, ...otherModels, ...files.filter((file) => ![modelFile, ...ytdFiles, ...otherModels].includes(file))], mode, files);
+      if (!loaded) return;
+      setFormat('YFT preview · GLB conversion');
+      setNotice({
+        kind: 'success',
+        message: `Loaded ${preview.meshCount} YFT meshes${preview.textureCount ? ` with ${preview.textureCount} matched textures` : ''} into the regular editor. Edit the preview and export it as GLB; native YFT rebuilding is not available.`,
+      });
+    } catch (error) {
+      setBusy(null);
+      setNotice({ kind: 'error', message: error instanceof Error ? error.message : 'Could not convert this YFT for the viewport.' });
+    }
   };
   const undo = () => { const prev = history.current.pop(); if (!prev || !root) return; future.current.push(cloneScene(root)); setRoot(prev); setSelectedId(prev.userData.forgeHistoryId || prev.uuid); setDirty(true); };
   const redo = () => { const next = future.current.pop(); if (!next || !root) return; history.current.push(cloneScene(root)); setRoot(next); setSelectedId(next.userData.forgeHistoryId || next.uuid); setDirty(true); };
@@ -404,7 +432,7 @@ function App() {
     const loaded = await walkFiles([file], 'replace');
     if (loaded) {
       setFormat('YFT model preview');
-      setNotice({ kind: 'success', message: 'YFT model and matching YTD textures are loaded in the 3D viewport.' });
+      setNotice({ kind: 'success', message: 'YFT preview loaded in the regular editor. Edit the preview and export as GLB; the original native YFT stays unchanged in its resource.' });
     }
   };
   const replaceNativeFile = (path: string, file: File) => {
@@ -473,10 +501,10 @@ function App() {
           <div className="scene-actions"><button className="subtle-button" onClick={() => openImport('append')}><Plus size={13} /> Add asset</button><button className={`square-button${searchOpen ? ' is-active' : ''}`} title="Search scene" aria-label="Search scene" onClick={() => { setSearchOpen(!searchOpen); setSceneQuery(''); }}><Search size={14} /></button></div>
           {searchOpen && <div className="tree-search"><Search size={13} /><input autoFocus placeholder="Filter objects" value={sceneQuery} onChange={(event) => setSceneQuery(event.target.value)} /><button onClick={() => { setSearchOpen(false); setSceneQuery(''); }} aria-label="Close scene search"><X size={13} /></button></div>}
           <div className="tree-content scrollbar-thin">
-            {!root ? <div className="scene-empty"><div className="empty-glyph"><Box size={18} /></div><b>Scene is empty</b><span>Import a model to begin working.</span><button onClick={() => openImport('append')}><Upload size={13} /> Import model</button></div> :
+            {!root ? <div className="scene-empty"><div className="empty-glyph"><Box size={18} /></div><b>Scene is empty</b><span>Import a GLB, OBJ, or YFT to edit its preview.</span><button onClick={() => openImport('append')}><Upload size={13} /> Import model</button></div> :
               <SceneTree root={root} selectedId={selectedId} query={sceneQuery} onSelect={setSelection} onRename={renameObject} onDuplicate={duplicateObject} onDelete={deleteObject} onVisible={toggleVisible} onLock={toggleLock} />}
           </div>
-          <div className="native-note"><span className="native-kicker">FIVEM RESOURCE</span><p>{resourcePackage ? `${resourcePackage.name} · ${resourcePackage.files.length} files` : 'ZIP and folder packaging'}</p><div>{unsupportedGame.map((ext) => <code key={ext}>{ext}</code>)}</div><small>{resourcePackage ? 'Preview YFT models with matching YTDs and replace decoded YTD textures.' : 'Import a ZIP or folder to preview native vehicle assets and edit texture dictionaries.'}</small>{resourcePackage && <><button className="resource-note-button" onClick={() => setTextureStudioOpen(true)}>Open texture studio</button><button className="resource-note-button" onClick={() => setResourceOpen(true)}>Browse resource files</button></>}</div>
+          <div className="native-note"><span className="native-kicker">FIVEM RESOURCE</span><p>{resourcePackage ? `${resourcePackage.name} · ${resourcePackage.files.length} files` : 'ZIP and folder packaging'}</p><div>{unsupportedGame.map((ext) => <code key={ext}>{ext}</code>)}</div><small>{resourcePackage ? 'Preview YFT models with matching YTDs and replace decoded YTD textures.' : 'Open a YFT directly, or import a ZIP/folder to replace YTD textures and package a resource.'}</small>{resourcePackage && <><button className="resource-note-button" onClick={() => setTextureStudioOpen(true)}>Open texture studio</button><button className="resource-note-button" onClick={() => setResourceOpen(true)}>Browse resource files</button></>}</div>
         </aside>}
         <section className="viewport-column">
           <div className="viewport-toolbar">
@@ -497,7 +525,7 @@ function App() {
           </div>
           <div className="view-stage">
             <Viewport root={root} grid={grid} axes={axes} wireframe={wireframe} orthographic={ortho} background={background} onSelect={setSelection} />
-            {!root && <div className="welcome-card"><div className="welcome-symbol"><Box size={21} strokeWidth={1.5} /></div><span className="eyebrow">LOCAL 3D + FIVEM RESOURCE WORKSPACE</span><h1>Bring your model<br />into focus.</h1><p>Inspect standard 3D assets, or import and package an existing FiveM vehicle resource.</p><div className="welcome-actions"><button className="primary-action" onClick={() => openImport('append')}><Upload size={15} /> Import a model</button><button className="secondary-action" onClick={() => setResourceOpen(true)}><FolderOpen size={15} /> FiveM resource</button></div><small>3D preview: GLB · GLTF · OBJ · STL <span>·</span> GTA files preserved in resource ZIPs</small></div>}
+            {!root && <div className="welcome-card"><div className="welcome-symbol"><Box size={21} strokeWidth={1.5} /></div><span className="eyebrow">LOCAL 3D + FIVEM RESOURCE WORKSPACE</span><h1>Bring your model<br />into focus.</h1><p>Open GLB, GLTF, OBJ, STL, or YFT models in the regular editor. Include matching YTDs for vehicle textures.</p><div className="welcome-actions"><button className="primary-action" onClick={() => openImport('append')}><Upload size={15} /> Import a model</button><button className="secondary-action" onClick={() => setResourceOpen(true)}><FolderOpen size={15} /> FiveM resource</button></div><small>YFT edits export as standard GLB; native YFT files stay unchanged.</small></div>}
             {dragging && <div className="drag-overlay"><div className="drag-target"><Upload size={24} /><b>Drop models to add to scene</b><span>Existing objects will be kept</span></div></div>}
             {busy && <div className="busy-chip"><span className="busy-dot" /><span>{busy.label}</span><div className="progress-track"><i style={{ width: `${busy.progress}%` }} /></div><span className="mono">{busy.progress}%</span></div>}
             <div className="view-corner view-corner-top"><span className="corner-dot" /> {format === '—' ? 'NO ASSET' : `${format} · LOCAL`}</div>
